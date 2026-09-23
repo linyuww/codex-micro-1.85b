@@ -91,7 +91,7 @@ python tools/ble_scan.py
 
 ```powershell
 python windows_companion.py --json-only -v
-python windows_companion.py --device-address 28:84:85:B2:1C:78 --watch --interval 60 -v
+python windows_companion.py --device-address xx:xx:xx:xx:xx:xx --watch --interval 60 -v
 ```
 
 把示例地址替换为你的设备地址。伴生程序复用本机 Codex 登录态，不需要 OpenAI API Key，
