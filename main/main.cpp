@@ -105,7 +105,6 @@ constexpr uint32_t kBatteryDimAfterMs = 120000;
 constexpr uint32_t kBatterySleepAfterMs = 300000;
 constexpr uint32_t kDockDimAfterMs = 600000;
 constexpr uint32_t kDockSleepAfterMs = 1800000;
-constexpr uint32_t kBatteryTelemetryIntervalMs = 30000;
 constexpr uint32_t kPowerTelemetryIntervalMs = 2000;
 // Keep the BLE link visibly alive for the host between key presses. This is
 // shorter than the 9.6 s supervision timeout Windows picks by a wide margin,
@@ -134,7 +133,6 @@ gfx::Canvas canvas;
 
 uint32_t quotaWaitingSinceMs = 0;
 uint32_t lastDrawMs = 0;
-uint32_t lastBatteryMs = 0;
 uint32_t lastPowerTelemetryMs = 0;
 uint32_t lastBatteryNotifyMs = 0;
 
@@ -161,6 +159,9 @@ uint32_t lastActivityMs = 0;
 int appliedBrightness = kActiveBrightness;
 int8_t batteryPercent = -1;
 bool charging = false;
+bool externalPower = false;
+bool discharging = false;
+bool batteryTelemetryInitialized = false;
 bool docked = false;
 bool dockStateInitialized = false;
 bool pendingDockState = false;
@@ -186,8 +187,7 @@ bool renderedHealthValid = false;
 dashboard::LinkHealth renderedLinkHealth = dashboard::LinkHealth::Offline;
 bool renderedQuotaStale = false;
 int8_t renderedBatteryPercent = -1;
-bool renderedCharging = false;
-bool renderedDocked = false;
+bool renderedExternalPower = false;
 bool renderedTimeValid = false;
 char renderedClock[8] = {};
 bool renderedNight = false;
@@ -448,7 +448,7 @@ void observeDockState(bool candidate) {
   ESP_LOGI(kTag, "POWER mode=%s", docked ? "dock" : "battery");
   if (docked) {
     // Plugging into a dock is intentional activity and should reveal the
-    // charging state even if the panel had already entered desk sleep.
+    // externally-powered state even if the panel was already in desk sleep.
     lastActivityMs = nowMs();
     if (deskSleeping) wakeDeskSleep();
   }
@@ -458,23 +458,30 @@ void updatePowerTelemetry(bool force = false) {
   const uint32_t now = nowMs();
   bool batteryChanged = false;
 
-  if (force || lastBatteryMs == 0 ||
-      now - lastBatteryMs >= kBatteryTelemetryIntervalMs) {
-    lastBatteryMs = now;
-    const battery::Sample sample = battery::read(now);
-    const int8_t nextLevel =
-        sample.percent < 0 ? -1 : static_cast<int8_t>(sample.percent);
-    batteryChanged = batteryPercent != nextLevel;
-    batteryPercent = nextLevel;
-  }
-
   if (force || lastPowerTelemetryMs == 0 ||
       now - lastPowerTelemetryMs >= kPowerTelemetryIntervalMs) {
     lastPowerTelemetryMs = now;
-    const battery::Sample sample = battery::cached();
-    batteryChanged = batteryChanged || charging != sample.charging;
+    const battery::Sample sample = battery::read(now);
+    const int8_t nextLevel =
+        sample.percent < 0 ? -1 : static_cast<int8_t>(sample.percent);
+    batteryChanged = batteryPercent != nextLevel || charging != sample.charging;
+    const bool telemetryChanged =
+        !batteryTelemetryInitialized || batteryChanged ||
+        externalPower != sample.externalPower ||
+        discharging != sample.discharging;
+    batteryPercent = nextLevel;
     charging = sample.charging;
-    observeDockState(sample.externalPower);
+    externalPower = sample.externalPower;
+    discharging = sample.discharging;
+    batteryTelemetryInitialized = true;
+    observeDockState(externalPower);
+
+    if (telemetryChanged) {
+      ESP_LOGI(kTag,
+               "BATTERY level=%d current=%d mA dsg=%d charging=%d external=%d",
+               batteryPercent, sample.currentMa, discharging ? 1 : 0,
+               charging ? 1 : 0, externalPower ? 1 : 0);
+    }
   }
 
   // Re-publish the battery level periodically even when it has not changed.
@@ -492,11 +499,6 @@ void updatePowerTelemetry(bool force = false) {
     const uint8_t level =
         batteryPercent >= 0 ? static_cast<uint8_t>(batteryPercent) : 0;
     codex.setBattery(level, charging);
-  }
-
-  if (batteryChanged) {
-    ESP_LOGI(kTag, "BATTERY level=%d charging=%d docked=%d", batteryPercent,
-             charging ? 1 : 0, docked ? 1 : 0);
   }
 }
 
@@ -532,8 +534,7 @@ dashboard::State dashboardState() {
   const connection_health::Result health = connectionHealth();
   ui.linkHealth = dashboardLinkHealth(health.link);
   ui.batteryPercent = batteryPercent;
-  ui.charging = charging;
-  ui.docked = docked;
+  ui.externalPower = docked;
   ui.quotaAvailable = state.quota.available;
   ui.quotaStale = health.quota == connection_health::Quota::Stale;
   ui.remainingPercent = state.quota.remainingPercent;
@@ -580,8 +581,7 @@ void drawScreen() {
   renderedLinkHealth = ui.linkHealth;
   renderedQuotaStale = ui.quotaStale;
   renderedBatteryPercent = ui.batteryPercent;
-  renderedCharging = ui.charging;
-  renderedDocked = ui.docked;
+  renderedExternalPower = ui.externalPower;
   renderedTimeValid = ui.timeValid;
   renderedNight = ui.night;
   renderedSetupPortal = ui.setupPortal;
@@ -915,8 +915,7 @@ void configureButton() {
         !renderedHealthValid || currentUi.linkHealth != renderedLinkHealth ||
         currentUi.quotaStale != renderedQuotaStale ||
         currentUi.batteryPercent != renderedBatteryPercent ||
-        currentUi.charging != renderedCharging ||
-        currentUi.docked != renderedDocked ||
+        currentUi.externalPower != renderedExternalPower ||
         // The clock ticks on its own, once a minute, with no event behind it,
         // and the theme flips twice a day. Comparing the formatted clock rather
         // than the minute keeps this to one string compare and catches the

@@ -32,6 +32,7 @@
 
 #include "Backgrounds.h"
 #include "BatteryIcons.h"
+#include "battery_logic.h"
 #include "IconTextures.h"
 #include "PixelFonts.h"
 #include "gfx.h"
@@ -171,8 +172,7 @@ struct State {
   std::array<ThreadVisual, 6> threads = {};
   LinkHealth linkHealth = LinkHealth::Offline;
   std::int8_t batteryPercent = -1;
-  bool charging = false;
-  bool docked = false;
+  bool externalPower = false;
   bool quotaAvailable = false;
   bool quotaStale = false;
   float remainingPercent = 0.0f;
@@ -357,32 +357,29 @@ inline void drawClockAndDate(gfx::Canvas& canvas, const State& state) {
 }
 
 inline void drawBattery(gfx::Canvas& canvas, std::int8_t percent,
-                       bool charging) {
+                       bool externalPower) {
   const gfx::Font& font = pixelFont();
   char label[8];
-  if (percent < 0) {
-    std::snprintf(label, sizeof(label), "--");
+  const int displayPercent = battery_logic::clampPercent(percent);
+  if (displayPercent < 0) {
+    std::snprintf(label, sizeof(label), "--%%");
   } else {
-    std::snprintf(label, sizeof(label), "%d%%", static_cast<int>(percent));
+    std::snprintf(label, sizeof(label), "%d%%", displayPercent);
   }
 
-  // Pick one of the artist's 5x2 battery textures. The level is a rounded-up
-  // bin of the percentage, so 20% becomes level 2; 0% and "unknown" share
-  // level 1. The whole texture (body + nub) replaces the procedural rails,
+  // Pick one of the artist's 5x2 battery textures. The inclusive bins are
+  // 0..20, 21..40, 41..60, 61..80 and 81..100; unknown shares level 1.
+  // The whole texture (body + nub) replaces the procedural rails,
   // so the icon's exact proportions follow the artist rather than the
   // kBatteryBodyW/NubW/H constants that used to drive the geometry.
-  int level = 1;
-  if (percent > 0) {
-    level = percent / 20 + 1;
-    if (level > 5) level = 5;
-  }
+  const int level = battery_logic::iconLevel(displayPercent);
   // Declared uint16_t, not a byte stream: the arrays are constexpr
   // std::uint16_t in BatteryIcons.h, so this needs no cast and stays
   // naturally aligned. (A uint8_t* reinterpret_cast to uint16_t* would be
   // 1-byte aligned, and Xtensa faults on a misaligned 16-bit load.)
   const std::uint16_t* rgb;
   const std::uint8_t* alpha;
-  if (charging) {
+  if (externalPower) {
     switch (level) {
       case 1: rgb = battery_data::kBatteryCharging1_rgb;
               alpha = battery_data::kBatteryCharging1_a; break;
@@ -449,7 +446,7 @@ inline void drawPanel(gfx::Canvas& canvas, const State& state) {
     return;
   }
 
-  drawBattery(canvas, state.batteryPercent, state.charging);
+  drawBattery(canvas, state.batteryPercent, state.externalPower);
   canvas.fillRect(kDividerX0, kDividerY, kDividerX1 - kDividerX0, 1, kDivider);
 
   canvas.drawTextInteger(font, linkHealthLabel(state.linkHealth), kCenterX,

@@ -118,10 +118,10 @@ SCENES = {
                   bg="bg-day.png",
                   agents=[("EMPTY", "A1"), ("EMPTY", "A2"), ("EMPTY", "A3"),
                           ("EMPTY", "A4"), ("EMPTY", "A5"), ("EMPTY", "A6")]),
-    # The board is on the dock: same day scene, but the battery texture
-    # is the charging row mid-tree (47% in level 3).
+    # The board is on external power: the green bolt remains visible even when
+    # charge current has tapered to zero (47% is level 3).
     "charging": dict(clock="10:08", date="SEP 22 MON", battery=47,
-                     charging=True,
+                     external_power=True,
                      status="CODEX LIVE", quota="67%", send="SEND",
                      countdown="4D 17H", bg="bg-day.png",
                      agents=[("THINK", "A1"), ("DONE", "A2"), ("INPUT", "A3"),
@@ -433,23 +433,29 @@ class Canvas:
 
 # ------------------------------------------------------------------ render ---
 
-def draw_battery(canvas, font, percent, cy, charging=False):
-    """The 5x2 battery texture chosen by percent + charging, alongside the %.
+def battery_level(percent):
+    """Return the firmware's inclusive 0..20 through 81..100 icon band."""
+    if percent < 0:
+        return 1
+    percent = min(100, percent)
+    return 1 if percent == 0 else (percent + 19) // 20
+
+
+def draw_battery(canvas, font, percent, cy, external_power=False):
+    """The battery texture chosen by percent + external power, alongside %.
 
     Mirrors drawBattery() in dashboard_ui.h. Both pull their pixel data from
     battery_icon_data.py so the preview cannot drift from the firmware.
     """
-    label = f"{percent}%"
+    display_percent = -1 if percent < 0 else min(100, percent)
+    label = "--%" if display_percent < 0 else f"{display_percent}%"
     icon_w = BATTERY["icon_w"]
     icon_h = BATTERY["icon_h"]
     gap = BATTERY["gap"]
 
     # Pick the icon. Level 1 is the lowest visible state; 100% is level 5.
-    if percent <= 0:
-        level = 1
-    else:
-        level = min(5, percent // 20 + 1)
-    table = battery_icon_data.BATTERY_CHARGING if charging \
+    level = battery_level(display_percent)
+    table = battery_icon_data.BATTERY_CHARGING if external_power \
         else battery_icon_data.BATTERY_IDLE
     words, alpha_bytes = table[level - 1]
 
@@ -483,7 +489,7 @@ def draw_panel(canvas, font, scene):
         return
 
     draw_battery(canvas, font, scene["battery"], BATTERY["cy"],
-                 charging=scene.get("charging", False))
+                 external_power=scene.get("external_power", False))
     canvas.rect(DIVIDER_X0, DIVIDER_Y, DIVIDER_X1 - DIVIDER_X0, 1, DIVIDER)
 
     canvas.text(font, scene["status"], 180, STATUS_LINE["cy"],

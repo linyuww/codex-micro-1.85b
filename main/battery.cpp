@@ -4,6 +4,7 @@
 
 #include <cstring>
 
+#include "battery_logic.h"
 #include "board_config.h"
 #include "board_i2c.h"
 #include "driver/usb_serial_jtag.h"
@@ -32,9 +33,6 @@ constexpr uint16_t kStatusDischarging = 0x0001;
 // faster only burns I2C bandwidth.
 constexpr uint32_t kRefreshIntervalMs = 5000;
 
-// Below this the pack is neither charging nor meaningfully discharging.
-constexpr int16_t kChargeCurrentThresholdMa = 20;
-
 // A plausible single-cell Li-ion reading. Anything outside means the gauge is
 // not populated (or not answering) on this board revision.
 constexpr uint16_t kMinPlausibleMv = 2000;
@@ -43,6 +41,11 @@ constexpr uint16_t kMaxPlausibleMv = 4600;
 Sample s_sample;
 uint32_t s_lastReadMs = 0;
 bool s_probed = false;
+
+void refreshExternalPower() {
+  s_sample.externalPower = battery_logic::hasExternalPower(
+      usb_serial_jtag_is_connected(), s_sample.valid, s_sample.discharging);
+}
 
 inline uint16_t littleEndian16(const uint8_t* p) {
   return static_cast<uint16_t>(p[0] | (p[1] << 8));
@@ -87,6 +90,8 @@ Sample read(uint32_t nowMs) {
   }
 
   if (s_lastReadMs != 0 && nowMs - s_lastReadMs < kRefreshIntervalMs) {
+    // USB SOF presence can change between gauge refreshes, so never cache it.
+    refreshExternalPower();
     return s_sample;
   }
 
@@ -111,20 +116,18 @@ Sample read(uint32_t nowMs) {
   s_sample.voltageMv = voltage;
   s_sample.currentMa = current;
   s_sample.percent = soc <= 100 ? static_cast<int>(soc) : -1;
+  s_sample.discharging = (status & kStatusDischarging) != 0;
   s_sample.charging =
-      current >= kChargeCurrentThresholdMa && (status & kStatusDischarging) == 0;
-  // USB presence is the authoritative dock signal: the pack can be full and
-  // still externally powered, in which case the charge current is near zero.
-  const bool usbAttached = usb_serial_jtag_is_connected();
-  s_sample.externalPower = usbAttached || current >= kChargeCurrentThresholdMa;
+      battery_logic::isCharging(current, s_sample.discharging);
   s_sample.fullChargeCapacityMah =
       littleEndian16(block + kRegFullChargeCapacity);
   s_sample.valid = s_sample.percent >= 0;
+  refreshExternalPower();
 
   s_lastReadMs = nowMs;
-  ESP_LOGD(kTag, "soc=%d%% %u mV %d mA charging=%d external=%d",
-           s_sample.percent, voltage, current, s_sample.charging ? 1 : 0,
-           s_sample.externalPower ? 1 : 0);
+  ESP_LOGD(kTag, "soc=%d%% %u mV %d mA dsg=%d charging=%d external=%d",
+           s_sample.percent, voltage, current, s_sample.discharging ? 1 : 0,
+           s_sample.charging ? 1 : 0, s_sample.externalPower ? 1 : 0);
   return s_sample;
 }
 

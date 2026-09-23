@@ -18,9 +18,9 @@ struct Sample {
   bool valid = false;
   int percent = -1;
   bool charging = false;
-  // True when the device is on external power (USB attached or current flowing
-  // into the pack). Drives the "docked" idle policy, matching the original
-  // firmware's VIN-based Dock Mode.
+  bool discharging = false;
+  // True when a USB host is attached or the gauge reports that the pack is not
+  // discharging. Drives the powered artwork and the dock idle policy.
   bool externalPower = false;
   uint16_t voltageMv = 0;
   int16_t currentMa = 0;

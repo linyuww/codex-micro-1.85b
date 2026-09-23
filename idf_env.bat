@@ -5,6 +5,7 @@ set "IDF_TOOLS_PATH=D:\Espressif"
 set "IDF_PATH=D:\Espressif\frameworks\esp-idf-v5.4.1"
 set "IDF_PYTHON_ENV_PATH=D:\Espressif\python_env\idf5.4_py3.12_env"
 set "IDF_PYTHON=%IDF_PYTHON_ENV_PATH%\Scripts\python.exe"
+set "ESP_ROM_ELF_DIR=%IDF_TOOLS_PATH%\tools\esp-rom-elfs\20241011"
 
 set "PATH=%IDF_TOOLS_PATH%\tools\xtensa-esp-elf\esp-14.2.0_20241119\xtensa-esp-elf\bin;%PATH%"
 set "PATH=%IDF_TOOLS_PATH%\tools\riscv32-esp-elf\esp-14.2.0_20241119\riscv32-esp-elf\bin;%PATH%"
