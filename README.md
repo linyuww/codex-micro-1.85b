@@ -1,15 +1,123 @@
-# Codex Micro — Waveshare ESP32-S3-Touch-LCD-1.85B 移植版
+# Codex Micro for Waveshare ESP32-S3-Touch-LCD-1.85B
+
+![Codex Micro 像素仪表盘预览](tools/preview/pixel-day.png)
 
 把 [digitsisyph/codex-micro-stopwatch](https://github.com/digitsisyph/codex-micro-stopwatch)
-（原 M5Stack StopWatch Dev Kit C152 / "M5StopWatch" 固件）移植到
-**Waveshare ESP32-S3-Touch-LCD-1.85B**。
+移植到 **Waveshare ESP32-S3-Touch-LCD-1.85B** 的原生 ESP-IDF 固件。
+它把这块圆屏开发板变成 ChatGPT Desktop 的实体控制器：屏幕显示 Codex 状态、
+额度、智能体和电池信息，触摸与 BOOT 键负责发送、选择智能体、语音和麦克风操作。
 
-- 功能与 UI 参照：<https://docs.m5stack.com/zh_CN/core/StopWatch>
-- 目标板文档：<https://docs.waveshare.net/ESP32-S3-Touch-LCD-1.85B>
-- 工程形态：**原生 ESP-IDF v5.4.1 工程**（不是 PlatformIO）
+> 本项目是社区移植版，不是 OpenAI、M5Stack 或 Waveshare 的官方固件。
 
-设备仍然是 "Codex Micro"：只负责转发按键 / 摇杆意图、显示宿主下发的遥测，
-所有实际控制逻辑仍归 ChatGPT Desktop。
+相关资料：[上游项目](https://github.com/digitsisyph/codex-micro-stopwatch) ·
+[M5Stack StopWatch 文档](https://docs.m5stack.com/zh_CN/core/StopWatch) ·
+[Waveshare 1.85B 文档](https://docs.waveshare.net/ESP32-S3-Touch-LCD-1.85B)
+
+## 功能一览
+
+- **360 × 360 像素仪表盘**：日夜主题、时钟日期、额度环、6 个智能体状态、连接健康度与完成提示。
+- **ChatGPT Desktop 控制**：支持选择智能体、Send、四向滑动、Voice Chat 和 push-to-talk。
+- **BLE HID + 私有遥测协议**：兼容 Codex Micro 的 JSON-RPC 分片协议，并上报真实电量。
+- **网页配网**：首次启动自动开放 `CODEX-XXXX` 热点，通过手机或电脑浏览器写入 Wi-Fi。
+- **自动校时**：联网后通过 SNTP 获取时间，默认显示 UTC+8。
+- **电源状态识别**：读取 BQ27220 电量计，区分电池供电、外部供电和充电状态。
+- **完成提示音**：使用 ES8311 + I2S 播放任务完成提示。
+- **Windows 额度伴生程序**：读取本机 Codex 周额度，并通过 BLE 同步到表盘。
+- **离线 UI 预览与回归工具**：无需烧录即可生成日间、夜间、离线、配网等界面截图。
+
+## 快速开始
+
+### 1. 准备环境
+
+- Waveshare ESP32-S3-Touch-LCD-1.85B
+- ESP-IDF 5.4 或更高版本（本仓库当前按 **v5.4.1** 验证）
+- Python 3.10+
+- Windows 10/11 + ChatGPT Desktop（需要使用实体控制功能和额度同步时）
+
+仓库内的 `idf_env.bat` / `idf_env.sh` 使用的是当前开发机上的 ESP-IDF 路径。
+如果你的安装位置不同，请先修改其中的 `IDF_TOOLS_PATH`、`IDF_PATH` 和
+`IDF_PYTHON_ENV_PATH`。
+
+### 2. 编译与烧录
+
+Windows CMD 或 PowerShell：
+
+```powershell
+.\idf.bat build
+.\idf.bat -p COM5 flash monitor
+```
+
+Git Bash：
+
+```bash
+source ./idf_env.sh
+idf build
+idf -p COM5 flash monitor
+```
+
+将 `COM5` 替换为开发板的实际串口。若修改过 `sdkconfig.defaults`，请先删除旧的
+`sdkconfig`，再重新编译，让默认配置重新生效。
+
+### 3. 首次配置 Wi-Fi
+
+设备没有保存过 Wi-Fi，或连续连接失败时，会进入配网模式：
+
+1. 在手机或电脑上连接屏幕显示的开放热点 `CODEX-XXXX`；
+2. 浏览器打开 <http://192.168.4.1>；
+3. 选择 2.4 GHz Wi-Fi，填写密码并保存；
+4. 设备重启、联网并通过 SNTP 校时。
+
+凭据只保存在设备 NVS 中，不会写入源码或提交到仓库。
+
+### 4. 配对 Codex Micro
+
+1. 打开 Windows“设置 → 蓝牙和设备 → 添加设备”；
+2. 选择 **Codex Micro** 并完成配对；
+3. 启动 ChatGPT Desktop，等待设备状态由离线变为可用；
+4. 若旧固件曾与电脑配对，请先删除旧的 **Codex Micro** 记录再重新配对。
+
+设备连接后仍显示“操作受限”时，先查看[蓝牙快速排障](#71-蓝牙连上了但不能操作怎么办)，
+不要直接清除整片 Flash 或修改蓝牙地址。
+
+### 5. 同步 Codex 额度（Windows）
+
+先查出设备的实际 BLE 地址：
+
+```powershell
+python tools/ble_scan.py
+```
+
+验证本机额度读取，然后持续同步：
+
+```powershell
+python windows_companion.py --json-only -v
+python windows_companion.py --device-address 28:84:85:B2:1C:78 --watch --interval 60 -v
+```
+
+把示例地址替换为你的设备地址。伴生程序复用本机 Codex 登录态，不需要 OpenAI API Key，
+也不会把账号凭据发送到开发板。
+
+## 常用配置入口
+
+| 配置内容 | 文件 / 位置 | 默认值或说明 |
+| --- | --- | --- |
+| ESP-IDF、编译器与 Python 路径 | `idf_env.bat` / `idf_env.sh` | 当前开发机使用 ESP-IDF v5.4.1 |
+| Flash、PSRAM、蓝牙、任务栈 | `sdkconfig.defaults` | ESP32-S3R8、16 MB Flash、8 MB Octal PSRAM |
+| 屏幕、触摸、音频、按键引脚 | `main/board_config.h` | Waveshare 1.85B 官方 BSP 引脚映射 |
+| 时区与 NTP 服务器 | `main/wifi_time.cpp` | UTC+8；双 NTP 服务器 |
+| 亮度与自动息屏时间 | `main/main.cpp` | 电池：2 分钟变暗、5 分钟息屏；外部供电：10/30 分钟 |
+| BLE 加密与调试日志 | `main/codex_ble.cpp` | `CODEX_BLE_REQUIRE_ENCRYPTION`、`CODEX_BLE_TRACE` |
+| UI 布局、颜色和文案 | `main/dashboard_ui.h` | 360 × 360 圆屏布局 |
+| 日夜背景与电池图标 | `main/assets/`、`main/Backgrounds.h`、`main/BatteryIcons.h` | 由 `tools/make_*.py` 生成 |
+| 额度同步周期与重试 | `windows_companion.py` 命令行参数 | `--interval`、`--write-attempts`、`--write-timeout-ms` |
+
+生成所有离线预览：
+
+```powershell
+python tools/pixel_preview.py --scene all
+```
+
+下面是硬件、协议、实现和排障的完整说明。
 
 ---
 
