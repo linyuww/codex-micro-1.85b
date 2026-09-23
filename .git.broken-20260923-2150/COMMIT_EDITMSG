@@ -1,0 +1,13 @@
+tools: add idf_build.py, a Git Bash-safe idf.py wrapper
+
+Encodes the two traps that made 'idf.py build' a silent no-op under Git
+Bash, so the next person does not have to rediscover them:
+
+  - idf.py skips main() when MSYSTEM is set, and Git Bash always sets it
+  - a ';'-separated PATH is mangled by MSYS path conversion
+
+Settings come from idf_env.bat rather than being hard-coded, so the
+wrapper tracks the toolchain if the installation changes.
+
+    python tools/idf_build.py build
+    python tools/idf_build.py -p COM5 flash

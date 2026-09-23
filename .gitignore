@@ -1,0 +1,18 @@
+# --- ESP-IDF generated output ---------------------------------------------
+# Build tree and the component-manager download cache are fully regenerable.
+build/
+managed_components/
+sdkconfig.old
+
+# --- Python bytecode caches ------------------------------------------------
+__pycache__/
+*.py[cod]
+
+# --- Transient serial captures and traces ----------------------------------
+# boot*.log, cap_*.log, trace*.log, live_test.log, probe_run.log, set_target.log
+*.log
+
+# --- Local, machine-specific state ----------------------------------------
+# Serial-port/device bindings, host bridge state, recovery images.
+.local/
+*.local.json

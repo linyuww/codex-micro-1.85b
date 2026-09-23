@@ -1,0 +1,42 @@
+// SPDX-License-Identifier: MIT
+// BQ27220 fuel gauge on the Waveshare ESP32-S3-Touch-LCD-1.85B (I2C 0x55).
+//
+// The C152 port read M5.Power for battery telemetry. This board exposes a
+// Texas Instruments BQ27220 gauge instead, which reports the same facts from a
+// 64-byte register block.
+
+#pragma once
+
+#include <cstdint>
+
+#include "esp_err.h"
+
+namespace battery {
+
+struct Sample {
+  // False until the first successful read; percent stays -1 until then.
+  bool valid = false;
+  int percent = -1;
+  bool charging = false;
+  // True when the device is on external power (USB attached or current flowing
+  // into the pack). Drives the "docked" idle policy, matching the original
+  // firmware's VIN-based Dock Mode.
+  bool externalPower = false;
+  uint16_t voltageMv = 0;
+  int16_t currentMa = 0;
+  uint16_t fullChargeCapacityMah = 0;
+};
+
+// Probes the gauge once. Returns ESP_OK when the part answers with a plausible
+// battery voltage.
+esp_err_t init();
+
+// Reads the gauge and updates the cached sample. Safe to call often; the
+// register block is only re-read when the cache is older than the refresh
+// interval.
+Sample read(uint32_t nowMs);
+
+// The most recent successful sample.
+const Sample& cached();
+
+}  // namespace battery

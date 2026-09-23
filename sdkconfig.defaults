@@ -1,0 +1,96 @@
+CONFIG_IDF_TARGET="esp32s3"
+
+# Flash / PSRAM: Waveshare ESP32-S3-Touch-LCD-1.85B = ESP32-S3R8 + 16MB flash
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASH_SAMPLE_MODE_STR=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+CONFIG_ESPTOOLPY_MONITOR_BAUD=115200
+CONFIG_ESPTOOLPY_AFTER_RESET=y
+CONFIG_ESPTOOLPY_BEFORE_RESET=y
+
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_XIP_FROM_PSRAM=y
+CONFIG_SPIRAM_FETCH_INSTRUCTIONS=y
+CONFIG_SPIRAM_RODATA=y
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=0
+CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+CONFIG_SPIRAM_MEMTEST=y
+
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+CONFIG_FREERTOS_HZ=1000
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=12288
+# Bluedroid and its controller are pinned to core 0, so keep the dashboard
+# loop on core 1 and let the two run without stealing each other's slices.
+# Leaving the loop on core 0 makes the BLE link drop with reason 0x08
+# (link-layer supervision timeout) roughly every 20 s: a full 360x360
+# dashboard redraw plus its QSPI flush saturates the core the controller
+# task needs to service connection events.
+CONFIG_ESP_MAIN_TASK_AFFINITY_CPU1=y
+CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096
+
+# Custom partition table: 4MB factory app for the Bluedroid stack + fonts
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_OFFSET=0x8000
+CONFIG_PARTITION_TABLE_MD5=y
+
+# Bluetooth: BLE only, Bluedroid (same stack family as the C152 original)
+CONFIG_BT_ENABLED=y
+CONFIG_BT_BLUEDROID_ENABLED=y
+CONFIG_BT_CLASSIC_ENABLED=n
+CONFIG_BT_BLE_ENABLED=y
+CONFIG_BT_GATTS_ENABLE=y
+CONFIG_BT_GATTC_ENABLE=n
+CONFIG_BT_GATT_MAX_SR_PROFILES=8
+CONFIG_BT_BLE_42_FEATURES_SUPPORTED=y
+CONFIG_BT_BLE_50_FEATURES_SUPPORTED=n
+CONFIG_BT_BLE_SMP_ENABLE=y
+CONFIG_BT_SMP_MAX_BONDS=8
+# Keep the controller task able to service the link; the dashboard loop runs
+# on the other core, so the two never contend for the same scheduler slice.
+CONFIG_BT_CTRL_BLE_MAX_ACT=4
+# Surface controller/host warnings instead of hiding the whole stack log.
+CONFIG_BT_STACK_NO_LOG=n
+# The controller's LE authenticated-payload timer tears down an otherwise
+# healthy link once the host goes idle: with it on, the board disconnects with
+# HCI reason 0x08 roughly 17 s after the last encrypted exchange, then
+# reconnects, in an endless loop. Windows does not refresh that timer while a
+# HID link sits idle, so switch it off. Espressif documents this option as the
+# workaround for LE-Ping compatibility problems.
+# CONFIG_BT_CTRL_LE_PING_EN is not set
+
+# USB Serial/JTAG console so the log works over the native USB-C port
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_CONSOLE_UART_DEFAULT=n
+
+# Wi-Fi + NTP: the clock source for the dashboard.
+#
+# Most of what this needs is already on by default (ESP_WIFI_ENABLED,
+# ESP_NETIF_TCPIP_LWIP, ESP_COEX_SW_COEXIST_ENABLE, SPIRAM_TRY_ALLOCATE_WIFI_LWIP),
+# so only two things are set explicitly here.
+#
+# Two NTP servers rather than the default one: a single hostname is a single
+# point of failure, and wifi_time sets server index 1 as well.
+CONFIG_LWIP_SNTP_MAX_SERVERS=2
+# Re-sync hourly. esp_timer keeps the clock between syncs, and the crystal
+# drifts about 20 ppm (roughly 1.7 s/day), so this is ample.
+CONFIG_LWIP_SNTP_UPDATE_DELAY=3600000
+
+# HTTP Server: the setup portal posts the Wi-Fi form back to itself.
+#
+# The 512-byte default is sized for a bare HTTP/1.1 request, but a browser sends
+# far more than that: sec-ch-ua, sec-fetch-*, Accept-Language and cookies
+# routinely total 800-1000 bytes. Anything over the limit is answered with
+# 431 Request Header Fields Too Large before the handler ever runs, which reads
+# to the user as "the password I typed was rejected".
+#
+# 2048 leaves generous headroom. The cost is heap, not stack: the parser's
+# scratch buffer lives inside the heap-allocated httpd_data struct.
+CONFIG_HTTPD_MAX_REQ_HDR_LEN=2048
+
+CONFIG_COMPILER_OPTIMIZATION_PERF=y

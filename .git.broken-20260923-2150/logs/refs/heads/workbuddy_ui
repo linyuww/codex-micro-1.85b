@@ -1,0 +1,5 @@
+0000000000000000000000000000000000000000 99ae4a201c29987eae25974801c315fef3f66883 linyuww <2949203814@qq.com> 1790165275 +0800	branch: Created from main
+99ae4a201c29987eae25974801c315fef3f66883 dfd3a759a8bb9d1749cf7f7cdbadf30f662ca01a linyuww <2949203814@qq.com> 1790165716 +0800	commit: fix(codex-ble): stop Codex Desktop from sitting at "connected with limited functionality"
+dfd3a759a8bb9d1749cf7f7cdbadf30f662ca01a 854c887d3464e16093ed32d255baee8c62505024 linyuww <2949203814@qq.com> 1790168339 +0800	commit: ui(battery): 5x2 battery icons with charging state
+854c887d3464e16093ed32d255baee8c62505024 bdcdf48daad7ac036e1671ddcbcefba6d7709be3 linyuww <2949203814@qq.com> 1790170588 +0800	commit: build(battery): emit RGB565 as uint16_t, drop the reinterpret_cast
+bdcdf48daad7ac036e1671ddcbcefba6d7709be3 c95b8cdf3f28238759c8ae6d8a3ecdbe6ee6abfa linyuww <2949203814@qq.com> 1790170713 +0800	commit: tools: add idf_build.py, a Git Bash-safe idf.py wrapper
