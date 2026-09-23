@@ -4,6 +4,9 @@ build/
 managed_components/
 sdkconfig.old
 
+# Recovered/corrupted Git metadata backups are local recovery material only.
+.git.broken-*/
+
 # --- Python bytecode caches ------------------------------------------------
 __pycache__/
 *.py[cod]
