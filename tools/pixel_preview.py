@@ -84,6 +84,10 @@ BATTERY = dict(cy=110, gap=8, icon_w=battery_icon_data.ICON_W,
                icon_h=battery_icon_data.ICON_H)
 STATUS_LINE = dict(cy=133, scale=1)
 QUOTA = dict(cy=158, scale=4)
+# The pairing prompt's headline. 3x, not the quota's 4x: "PAIR" at 4x measures
+# wider than the panel's 114 px inner width. See PAIRING_SCALE in
+# dashboard_ui.h.
+PAIRING_SCALE = 3
 SEND = dict(cy=182, scale=1)
 COUNTDOWN = dict(cy=194, scale=1)
 BTN_W, BTN_H = 77, 35
@@ -118,6 +122,14 @@ SCENES = {
                   bg="bg-day.png",
                   agents=[("EMPTY", "A1"), ("EMPTY", "A2"), ("EMPTY", "A3"),
                           ("EMPTY", "A4"), ("EMPTY", "A5"), ("EMPTY", "A6")]),
+    # Bluetooth pairing mode: the panel carries the prompt instead of the
+    # readout. Reached by holding the BOOT key for three seconds, which drops
+    # every stored bond and reopens advertising so the host has to pair again.
+    "pairing": dict(clock="10:08", date="SEP 22 MON", battery=86,
+                    pairing=True, pairing_window="118S LEFT",
+                    bg="bg-day.png",
+                    agents=[("EMPTY", "A1"), ("EMPTY", "A2"), ("EMPTY", "A3"),
+                            ("EMPTY", "A4"), ("EMPTY", "A5"), ("EMPTY", "A6")]),
     # The board is on external power: the green bolt remains visible even when
     # charge current has tapered to zero (47% is level 3).
     "charging": dict(clock="10:08", date="SEP 22 MON", battery=47,
@@ -468,12 +480,12 @@ def draw_battery(canvas, font, percent, cy, external_power=False):
 
 
 def draw_panel(canvas, font, scene):
-    """The information panel -- or the setup prompt, which takes its place.
+    """The information panel -- or the setup / pairing prompt, which takes it.
 
-    Mirrors drawPanel() in dashboard_ui.h. The two branches are exclusive
-    rather than layered: link health and quota are both meaningless before the
-    device is on a network, so the setup prompt replaces them and reuses the
-    same four rows, leaving the layout where it was.
+    Mirrors drawPanel() in dashboard_ui.h. The branches are exclusive rather
+    than layered: link health and quota are both meaningless in the setup and
+    pairing states, so each prompt replaces them and reuses the same four rows,
+    leaving the layout where it was.
     """
     canvas.pixel_frame(PANEL["x"], PANEL["y"], PANEL["w"], PANEL["h"],
                        FRAME, FILL, cut=PANEL["cut"], thickness=2)
@@ -491,6 +503,19 @@ def draw_panel(canvas, font, scene):
     draw_battery(canvas, font, scene["battery"], BATTERY["cy"],
                  external_power=scene.get("external_power", False))
     canvas.rect(DIVIDER_X0, DIVIDER_Y, DIVIDER_X1 - DIVIDER_X0, 1, DIVIDER)
+
+    if scene.get("pairing"):
+        # Same four rows as the setup prompt, but the headline is at 3x rather
+        # than the quota's 4x: "PAIR" at 4x measures wider than the panel's
+        # 114 px inner width.
+        canvas.text(font, "BLUETOOTH", 180, STATUS_LINE["cy"], 1,
+                    ACCENT_GREEN, centre=True)
+        canvas.text(font, "PAIR", 180, QUOTA["cy"], PAIRING_SCALE,
+                    ACCENT_GREEN, centre=True)
+        canvas.text(font, "CODEX MICRO", 180, SEND["cy"], 1, TEXT, centre=True)
+        canvas.text(font, scene["pairing_window"], 180, COUNTDOWN["cy"], 1,
+                    DIM, centre=True)
+        return
 
     canvas.text(font, scene["status"], 180, STATUS_LINE["cy"],
                 STATUS_LINE["scale"], ACCENT_GREEN, centre=True)

@@ -77,6 +77,10 @@ constexpr int kDividerX1 = 235;
 constexpr int kStatusLineY = 133;
 constexpr int kQuotaY = 158;
 constexpr int kQuotaScale = 4;
+// The pairing prompt's headline. It is deliberately smaller than the quota
+// figure: "PAIR" at 4x measures wider than the panel's 114 px inner width,
+// while 3x leaves the same visual weight without touching the frame.
+constexpr int kPairingScale = 3;
 constexpr int kSendY = 182;
 constexpr int kCountdownY = 194;
 
@@ -201,6 +205,14 @@ struct State {
   // exist nowhere on screen otherwise.
   bool setupPortal = false;
   char setupSsid[33] = {};
+
+  // Set while the user has put the device into BLE pairing mode. Like the
+  // setup portal, this is the one screen where the panel must carry
+  // instructions rather than telemetry: the whole point of the gesture is that
+  // the user is now standing at the host looking for a device to add, and the
+  // name to look for is not written anywhere else.
+  bool pairing = false;
+  std::uint32_t pairingSecondsLeft = 0;
 };
 
 inline AgentStatus classify(const ThreadVisual& light) {
@@ -449,6 +461,37 @@ inline void drawPanel(gfx::Canvas& canvas, const State& state) {
   drawBattery(canvas, state.batteryPercent, state.externalPower);
   canvas.fillRect(kDividerX0, kDividerY, kDividerX1 - kDividerX0, 1, kDivider);
 
+  if (state.pairing) {
+    // The panel becomes the pairing prompt. Link health and quota are both
+    // meaningless here -- the link was just torn down on purpose -- so the
+    // four rows carry the only three facts the user needs: that the board is
+    // in pairing mode, the name to look for in the host's Bluetooth settings,
+    // and how long the window lasts. The battery row above is kept, because
+    // running out of charge halfway through a re-pair is a real failure mode.
+    canvas.drawTextInteger(font, "BLUETOOTH", kCenterX, kStatusLineY,
+                           gfx::Datum::MiddleCenter, kAccent, kSmallScale);
+    canvas.drawTextInteger(font, "PAIR", kCenterX, kQuotaY,
+                           gfx::Datum::MiddleCenter, kAccent, kPairingScale);
+    canvas.drawTextInteger(font, "CODEX MICRO", kCenterX, kSendY,
+                           gfx::Datum::MiddleCenter, kText, kSmallScale);
+
+    // Sized for the whole unsigned long range rather than for the two-minute
+    // window the value actually occupies: this build turns
+    // -Wformat-truncation into an error, so the buffer has to rule out the
+    // worst case the format string can produce, not the worst case that can
+    // occur. (20 digits + "S LEFT" + NUL.)
+    char window[32];
+    if (state.pairingSecondsLeft == 0) {
+      std::snprintf(window, sizeof(window), "WAITING");
+    } else {
+      std::snprintf(window, sizeof(window), "%luS LEFT",
+                    static_cast<unsigned long>(state.pairingSecondsLeft));
+    }
+    canvas.drawTextInteger(font, window, kCenterX, kCountdownY,
+                           gfx::Datum::MiddleCenter, kMuted, kSmallScale);
+    return;
+  }
+
   canvas.drawTextInteger(font, linkHealthLabel(state.linkHealth), kCenterX,
                          kStatusLineY, gfx::Datum::MiddleCenter,
                          linkHealthColor(state.linkHealth), kSmallScale);
@@ -533,6 +576,11 @@ inline void drawMotto(gfx::Canvas& canvas) {
 }
 
 inline void drawTransient(gfx::Canvas& canvas, const State& state) {
+  // The pairing prompt owns the panel while it is up, and the gesture that
+  // enters it deliberately releases the mic first, so a leftover LISTENING
+  // plate would both hide the instructions and be stale.
+  if (state.pairing) return;
+
   const char* message = nullptr;
   std::uint16_t color = kAccent;
   if (state.sendPressed) {

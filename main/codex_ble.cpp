@@ -18,6 +18,8 @@
 #include "esp_gatts_api.h"
 #include "esp_log.h"
 #include "esp_mac.h"
+#include "esp_system.h"
+#include "freertos/task.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 
@@ -166,6 +168,53 @@ void clearIncompatibleBondsOnce() {
            static_cast<unsigned>(kBondRevision), removed);
 }
 
+// ---------------------------------------------------- bond generation store --
+//
+// The Bluetooth address the board presents is derived from the factory MAC
+// XORed with a "bond generation" byte (see esp_base_mac_addr_set() in begin()).
+// Bumping that byte makes the host see a device it has never met, which is the
+// only way out when a host holds a record it reports as unpaired while
+// refusing to start a fresh pairing.
+//
+// It used to be a compile-time constant, which made the escape hatch reachable
+// only by reflashing. It now lives in NVS so the BOOT key can trigger it at
+// runtime -- see CodexMicroBle::resetBondGenerationAndRestart().
+//
+// The default reproduces the address every build since 2026-09-23 has
+// advertised (0x5D), so a board that is already paired keeps its bond across
+// this change; the key only appears in NVS once the button is used.
+constexpr char kBondGenerationNvsKey[] = "bond_gen";
+constexpr uint8_t kDefaultBondGeneration = 0x5D;
+
+uint8_t loadBondGeneration() {
+  nvs_handle_t handle = 0;
+  if (nvs_open(kQuotaNvsNamespace, NVS_READONLY, &handle) != ESP_OK) {
+    return kDefaultBondGeneration;
+  }
+  uint8_t value = kDefaultBondGeneration;
+  if (nvs_get_u8(handle, kBondGenerationNvsKey, &value) != ESP_OK) {
+    value = kDefaultBondGeneration;
+  }
+  nvs_close(handle);
+  return value;
+}
+
+bool storeBondGeneration(uint8_t value) {
+  nvs_handle_t handle = 0;
+  if (nvs_open(kQuotaNvsNamespace, NVS_READWRITE, &handle) != ESP_OK) {
+    ESP_LOGE(kTag, "bond generation not saved: nvs_open failed");
+    return false;
+  }
+  esp_err_t result = nvs_set_u8(handle, kBondGenerationNvsKey, value);
+  if (result == ESP_OK) result = nvs_commit(handle);
+  nvs_close(handle);
+  if (result != ESP_OK) {
+    ESP_LOGE(kTag, "bond generation not saved: %s", esp_err_to_name(result));
+    return false;
+  }
+  return true;
+}
+
 constexpr char kDeviceName[] = "Codex Micro";
 constexpr char kManufacturer[] = "Work Louder";
 constexpr char kFirmwareVersion[] = "0.1.0-waveshare-1.85b";
@@ -192,6 +241,14 @@ constexpr size_t kReportBodySize = 63;
 // ESP_GATT_PERM_READ_ENCRYPTED | ESP_GATT_PERM_WRITE_ENCRYPTED.
 //
 // Set to 0 only as a bring-up experiment; it is not a fix for a stale bond.
+//
+// Worth recording what this is NOT: on 2026-09-25 a host that had gone into
+// the "reads battery and quota but never the HID handles" state was diagnosed
+// as "the link is unencrypted", and turning this off was tried. It changed
+// nothing -- the host kept reading exactly the same four handles. What actually
+// fixed it was resetting the host's Bluetooth stack (tools/bt_radio_toggle.py).
+// So the encrypted permissions were never the obstacle, and the symptom of a
+// host that has stopped enumerating is *not* evidence about encryption.
 #ifndef CODEX_BLE_REQUIRE_ENCRYPTION
 #define CODEX_BLE_REQUIRE_ENCRYPTION 1
 #endif
@@ -576,9 +633,12 @@ CodexMicroBle* g_instance = nullptr;
 esp_gatt_if_t g_gattsInterface = ESP_GATT_IF_NONE;
 
 // Connection ids are needed to address notifications. Bluedroid only reports
-// them through GATTS events, so keep a small table here.
+// them through GATTS events, so keep a small table here. The peer address is
+// kept alongside because a disconnect (and therefore the pairing gesture that
+// forces one) has to be addressed by address, not by connection id.
 constexpr size_t kMaxConnections = 8;
 uint16_t g_connectionIds[kMaxConnections] = {};
+esp_bd_addr_t g_connectionAddrs[kMaxConnections] = {};
 uint16_t g_connectionCount = 0;
 
 // Attribute handles are only known once the GATT table is registered, and the
@@ -616,12 +676,19 @@ void registerAttributeTable(esp_gatt_if_t gattsIf, size_t index) {
                                kServiceTables[index].count, 0);
 }
 
-void rememberConnection(uint16_t connId) {
+void rememberConnection(uint16_t connId, const uint8_t* address) {
   for (size_t i = 0; i < g_connectionCount; ++i) {
-    if (g_connectionIds[i] == connId) return;
+    if (g_connectionIds[i] == connId) {
+      if (address != nullptr) memcpy(g_connectionAddrs[i], address, 6);
+      return;
+    }
   }
   if (g_connectionCount < kMaxConnections) {
-    g_connectionIds[g_connectionCount++] = connId;
+    g_connectionIds[g_connectionCount] = connId;
+    if (address != nullptr) {
+      memcpy(g_connectionAddrs[g_connectionCount], address, 6);
+    }
+    ++g_connectionCount;
   }
 }
 
@@ -630,6 +697,7 @@ void forgetConnection(uint16_t connId) {
     if (g_connectionIds[i] == connId) {
       for (size_t j = i + 1; j < g_connectionCount; ++j) {
         g_connectionIds[j - 1] = g_connectionIds[j];
+        memcpy(g_connectionAddrs[j - 1], g_connectionAddrs[j], 6);
       }
       --g_connectionCount;
       return;
@@ -718,17 +786,31 @@ void gapCallback(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t* param) {
         g_advertising = true;
         ESP_LOGI(kTag, "advertising as \"%s\"", kDeviceName);
       }
+      if (g_instance != nullptr) g_instance->onAdvertisingState(g_advertising);
       break;
     case ESP_GAP_BLE_ADV_STOP_COMPLETE_EVT:
       g_advertisingStartPending = false;
       g_advertising = false;
+      if (g_instance != nullptr) g_instance->onAdvertisingState(false);
       break;
     case ESP_GAP_BLE_SEC_REQ_EVT:
       esp_ble_gap_security_rsp(param->ble_security.ble_req.bd_addr, true);
       break;
     case ESP_GAP_BLE_AUTH_CMPL_EVT:
       if (param->ble_security.auth_cmpl.success) {
-        ESP_LOGI(kTag, "pairing complete");
+        // Report what the pairing actually produced, not just that it ended:
+        // auth_mode carries the SC/MITM/bond bits, and key_present tells us
+        // whether keys were really exchanged. A "successful" pairing that
+        // leaves the link unencrypted is the failure this log exists to make
+        // visible -- see CODEX_BLE_REQUIRE_ENCRYPTION above.
+        ESP_LOGI(kTag,
+                 "pairing complete auth_mode=0x%02x key_type=0x%02x "
+                 "key_present=%d addr_type=%d bonds=%d",
+                 param->ble_security.auth_cmpl.auth_mode,
+                 param->ble_security.auth_cmpl.key_type,
+                 param->ble_security.auth_cmpl.key_present ? 1 : 0,
+                 param->ble_security.auth_cmpl.addr_type,
+                 esp_ble_get_bond_device_num());
       } else {
         ESP_LOGW(kTag, "pairing failed reason=0x%x",
                  param->ble_security.auth_cmpl.fail_reason);
@@ -740,6 +822,18 @@ void gapCallback(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t* param) {
     case ESP_GAP_BLE_PASSKEY_NOTIF_EVT:
       ESP_LOGI(kTag, "passkey %06u",
                static_cast<unsigned>(param->ble_security.key_notif.passkey));
+      break;
+    case ESP_GAP_BLE_PASSKEY_REQ_EVT:
+      // Should not happen: this board declares NoInputNoOutput, so the SMP
+      // association model is Just Works. If a host asks anyway, answer it
+      // instead of staying silent -- an unanswered request is exactly what
+      // reads as "passkey entry failed" on the peer.
+      ESP_LOGW(kTag, "host requested a passkey; answering with the fixed one");
+      esp_ble_passkey_reply(param->ble_security.ble_req.bd_addr, true, 0);
+      break;
+    case ESP_GAP_BLE_KEY_EVT:
+      ESP_LOGI(kTag, "host key type=0x%02x",
+               param->ble_security.ble_key.key_type);
       break;
     case ESP_GAP_BLE_UPDATE_CONN_PARAMS_EVT:
       ESP_LOGI(kTag,
@@ -806,10 +900,11 @@ void gattsCallback(esp_gatts_cb_event_t event, esp_gatt_if_t gattsIf,
     }
 
     case ESP_GATTS_CONNECT_EVT:
-      rememberConnection(param->connect.conn_id);
+      rememberConnection(param->connect.conn_id, param->connect.remote_bda);
       g_advertising = false;
       g_advertisingStartPending = false;
       if (g_instance != nullptr) {
+        g_instance->onAdvertisingState(false);
         g_instance->onConnectionEvent(true, param->connect.conn_id);
       }
       logConnectionParameters(param->connect.remote_bda);
@@ -1024,7 +1119,12 @@ esp_err_t CodexMicroBle::begin() {
   // a device Windows has never seen, so it will not auto-connect and `conns=0`
   // is expected until the host pairs once. Bump this only when the BTHLEDEVICE
   // chain for the current address is broken *and* you accept re-pairing.
-  constexpr uint8_t kBondGeneration = 0x5D;
+  //
+  // Read from NVS instead of being compiled in, because the BOOT key can now
+  // bump it at runtime: see resetBondGenerationAndRestart(). An unprogrammed
+  // key yields kDefaultBondGeneration, which is the address this build has
+  // always advertised, so an already-paired board is unaffected.
+  const uint8_t kBondGeneration = loadBondGeneration();
   uint8_t factoryMac[6] = {};
   if (esp_efuse_mac_get_default(factoryMac) == ESP_OK) {
     factoryMac[5] = static_cast<uint8_t>(factoryMac[5] ^ kBondGeneration);
@@ -1110,6 +1210,81 @@ void CodexMicroBle::setReportHandles(uint16_t input, uint16_t output,
 
 void CodexMicroBle::markDisconnected(uint16_t connId) {
   forgetConnection(connId);
+}
+
+int CodexMicroBle::enterPairingMode() {
+  // 1. Drop the host link first. A bond cannot be removed cleanly while its
+  //    owner is still using it, and the disconnect is also what makes the host
+  //    throw away the GATT handle cache it built for this connection -- which
+  //    is the other half of why a stale session misbehaves (see README 6.11).
+  const uint16_t links = g_connectionCount;
+  for (uint16_t i = 0; i < g_connectionCount; ++i) {
+    ESP_LOGI(kTag, "pairing: disconnecting id=%u", g_connectionIds[i]);
+    esp_ble_gap_disconnect(g_connectionAddrs[i]);
+  }
+
+  // 2. Throw away this board's half of every bond. This is the actual cure:
+  //    with no local LTK, the host's next attempt to resume encryption is
+  //    answered with "PIN or key missing", which is the signal Windows needs
+  //    to drop its own stale record and start a fresh Just Works pairing.
+  int removed = 0;
+  const int count = esp_ble_get_bond_device_num();
+  if (count > 0) {
+    auto* devices = new esp_ble_bond_dev_t[count];
+    int listed = count;
+    if (esp_ble_get_bond_device_list(&listed, devices) == ESP_OK) {
+      for (int index = 0; index < listed; ++index) {
+        if (esp_ble_remove_bond_device(devices[index].bd_addr) == ESP_OK) {
+          ++removed;
+        }
+      }
+    }
+    delete[] devices;
+  }
+
+  // 3. The next connection is a new session, not a continuation of the old
+  //    one. Without this the dashboard would keep reporting CODEX LIVE for a
+  //    host that has just been forgotten.
+  if (stateMutex_ != nullptr) xSemaphoreTake(stateMutex_, portMAX_DELAY);
+  clearHostRpcIdentity();
+  state_.connected = false;
+  state_.hostRpcObserved = false;
+  state_.lastHostRpcAtMs = 0;
+  state_.dirty = true;
+  if (stateMutex_ != nullptr) xSemaphoreGive(stateMutex_);
+  rpcLength_ = 0;
+  rpcBufferConnectionValid_ = false;
+
+  // 4. Be pairable again. If a link was up, its disconnect event restarts
+  //    advertising a moment later; this covers the case where there was no
+  //    link to drop, or where that event has not been processed yet.
+  startAdvertising();
+
+  ESP_LOGW(kTag,
+           "pairing mode: dropped %d bond(s), signalled %u link(s), "
+           "advertising=%d",
+           removed, static_cast<unsigned>(links), g_advertising ? 1 : 0);
+  return removed;
+}
+
+bool CodexMicroBle::resetBondGenerationAndRestart() {
+  const uint8_t current = loadBondGeneration();
+  const uint8_t next = static_cast<uint8_t>(current + 1);
+  if (!storeBondGeneration(next)) return false;
+
+  // Drop the bonds as well: the new address means the host has to pair from
+  // scratch anyway, and a bond it can never use again is worse than none.
+  const int removed = enterPairingMode();
+  ESP_LOGW(kTag,
+           "bond generation 0x%02X -> 0x%02X (%d bond(s) dropped); restarting "
+           "to advertise an address the host has never seen",
+           current, next, removed);
+
+  // Let the disconnect and this log reach the wire before the reset, so a
+  // serial capture records what actually happened.
+  vTaskDelay(pdMS_TO_TICKS(200));
+  esp_restart();
+  return true;  // Not reached.
 }
 
 void CodexMicroBle::poll() {

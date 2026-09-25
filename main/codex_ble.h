@@ -71,10 +71,38 @@ class CodexMicroBle {
   void sendKey(const char* key, uint8_t action, int8_t agent = -1);
   void sendJoystick(float angle, float distance);
   bool connected();
+  bool advertising() const { return advertising_.load(); }
   CodexMicroState snapshot();
+
+  // ---------------------------------------------------------- pairing mode --
+  //
+  // The button-driven equivalent of holding the pairing key on a headset:
+  // drop the host link, throw away every stored bond, and go back to pairable
+  // advertising so the host is forced to pair from scratch.
+  //
+  // This is the software cure for the failure the whole BLE section of the
+  // README is about. A bond has two halves; when the host's half survives a
+  // reflash, an NVS erase or an address change, the host keeps trying to
+  // resume encryption with a key this board no longer holds, the link comes up
+  // unencrypted, and the desktop app reports the device as "connected with
+  // limited functionality". Dropping this board's half on demand is the one
+  // recovery action that does not need a serial console, a reflash or Windows'
+  // Settings app.
+  //
+  // Returns the number of bonds that were removed.
+  int enterPairingMode();
+
+  // The escalation for a host record that is stuck in the contradictory
+  // "reports unpaired, refuses to pair" state: bump the stored bond generation
+  // and reboot, so the board advertises an address the host has never seen.
+  // The host then treats it as a brand-new device and pairs it cleanly.
+  //
+  // Only returns on failure -- success ends in esp_restart().
+  bool resetBondGenerationAndRestart();
 
   // Exposed for the GAP/GATTS callbacks, which are plain C entry points.
   void onConnectionEvent(bool connected, uint16_t id);
+  void onAdvertisingState(bool advertising) { advertising_.store(advertising); }
   void onOutput(const uint8_t* data, size_t length, uint16_t connectionId,
                 const uint8_t* peerAddress);
   void onQuotaWrite(const uint8_t* data, size_t length, bool responseExpected,
@@ -139,6 +167,7 @@ class CodexMicroBle {
   bool charging_ = false;
   connection_health::ConnectionSet connections_;
   std::atomic<bool> connectionEventLost_{false};
+  std::atomic<bool> advertising_{false};
 
   uint16_t inputHandle_ = 0;
   uint16_t outputHandle_ = 0;

@@ -116,6 +116,27 @@ constexpr uint32_t kPowerOffHoldMs = 6000;
 constexpr uint32_t kButtonDoubleClickMs = 500;
 constexpr uint32_t kMicHoldThresholdMs = 700;
 
+// Bluetooth pairing gesture. The board has exactly one user key, so the
+// pairing action shares it with push-to-talk and is separated by hold length.
+//
+// Holding past kPairingHoldMs drops the host link, forgets every stored bond
+// and goes back to pairable advertising -- the software equivalent of holding
+// the pairing key on a headset. That is the recovery action for the failure
+// this port has fought since day one: a host that keeps a stale half of the
+// bond, brings the link up unencrypted, and reports the device as connected
+// with limited functionality.
+constexpr uint32_t kPairingHoldMs = 3000;
+// Keep holding and the board escalates. A host record can reach a state where
+// it reports the device as unpaired while refusing to start a fresh pairing,
+// and then no amount of bond clearing on this side helps. Storing a new bond
+// generation and rebooting makes the board advertise an address the host has
+// never seen, which it pairs cleanly as a brand-new device.
+constexpr uint32_t kPairingHardResetHoldMs = 8000;
+// How long the pairing window stays open. Long enough to walk to the host and
+// open its Bluetooth settings, short enough that the board is not left
+// advertising as pairable for the rest of the day.
+constexpr uint32_t kPairingWindowMs = 120000;
+
 // The ST77916 backlight is a direct LEDC channel, so these are percentages.
 constexpr int kActiveBrightness = 90;
 constexpr int kDimBrightness = 18;
@@ -173,12 +194,23 @@ bool buttonPressed = false;
 bool buttonRawPressed = false;
 bool buttonStablePressed = false;
 bool buttonWakeConsumed = false;
+// Set when the current hold was spent on the pairing gesture, so releasing it
+// must not also be read as a single click (which would send the Send key).
+bool buttonPairingConsumed = false;
 bool touchWakeConsumed = false;
 uint32_t buttonRawChangedAtMs = 0;
 constexpr uint32_t kButtonDebounceMs = 30;
 uint32_t buttonPressedAtMs = 0;
 bool micHoldActive = false;
 button_gesture::Detector buttonGesture(kButtonDoubleClickMs);
+
+// -------------------------------------------------------------- pairing --
+bool pairingMode = false;
+uint32_t pairingModeUntilMs = 0;
+uint32_t pairingSecondsLeft = 0;
+int pairingBondsDropped = 0;
+// Set once the link has been observed down while pairing. See updatePairingMode.
+bool pairingSawDisconnect = false;
 
 bool touchPowerHoldConsumed = false;
 dashboard::PowerOverlay powerOverlay = dashboard::PowerOverlay::None;
@@ -192,6 +224,8 @@ bool renderedTimeValid = false;
 char renderedClock[8] = {};
 bool renderedNight = false;
 bool renderedSetupPortal = false;
+bool renderedPairing = false;
+uint32_t renderedPairingSeconds = 0;
 
 // Refreshed once per loop iteration rather than per query, so the several
 // callers inside one iteration all see the same instant.
@@ -202,6 +236,9 @@ void drawScreen();
 void releaseControlsForPowerOff();
 void enterPowerOff();
 void beginVoiceChatClick();
+void enterPairingMode();
+void exitPairingMode(const char* reason);
+void updatePairingMode();
 
 // --------------------------------------------------------------- utilities --
 
@@ -254,6 +291,11 @@ void wakeDeskSleep() {
 // disabled, so light sleep would power PSRAM down underneath the running code.
 void enterPowerOff() {
   touchPowerHoldConsumed = true;
+  // A pairing window cannot outlive the screen going off: the user is no longer
+  // looking at the instructions, and the countdown would have expired before
+  // the screen came back anyway.
+  pairingMode = false;
+  pairingSecondsLeft = 0;
   powerOverlay = dashboard::PowerOverlay::PoweringOff;
   drawScreen();
   powerOffActive = true;
@@ -559,6 +601,8 @@ dashboard::State dashboardState() {
   if (networkStatus.portalRunning) {
     std::snprintf(ui.setupSsid, sizeof(ui.setupSsid), "%s", networkStatus.apSsid);
   }
+  ui.pairing = pairingMode;
+  ui.pairingSecondsLeft = pairingSecondsLeft;
   if (touchPowerHoldConsumed) {
     const uint32_t heldMs = nowMs() - touchSendStartedAtMs;
     ui.powerHoldProgress = std::max(
@@ -585,6 +629,8 @@ void drawScreen() {
   renderedTimeValid = ui.timeValid;
   renderedNight = ui.night;
   renderedSetupPortal = ui.setupPortal;
+  renderedPairing = ui.pairing;
+  renderedPairingSeconds = ui.pairingSecondsLeft;
   std::snprintf(renderedClock, sizeof(renderedClock), "%s", ui.clock);
 }
 
@@ -716,6 +762,67 @@ void updateTouchPowerHold() {
   }
 }
 
+// ------------------------------------------------------------------ pairing --
+
+// Entering pairing mode is deliberately destructive, because that is what the
+// situation calls for: the only reason to ask for it is that the existing
+// pairing is unusable. Dropping this board's half of the bond is the one
+// recovery step that does not need a serial console, a reflash, or a working
+// Windows Settings entry.
+void enterPairingMode() {
+  const int removed = codex.enterPairingMode();
+  pairingBondsDropped = removed;
+  pairingMode = true;
+  pairingSawDisconnect = false;
+  pairingModeUntilMs = nowMs() + kPairingWindowMs;
+  pairingSecondsLeft = kPairingWindowMs / 1000;
+  // The pairing prompt is the whole point of the gesture, so it must be lit
+  // even if the device was dimmed when the key was pressed.
+  lastActivityMs = nowMs();
+  ESP_LOGW(kTag, "PAIRING on: bonds_dropped=%d window=%lus advertising=%d",
+           removed, static_cast<unsigned long>(kPairingWindowMs / 1000),
+           codex.advertising() ? 1 : 0);
+  drawScreen();
+}
+
+void exitPairingMode(const char* reason) {
+  if (!pairingMode) return;
+  pairingMode = false;
+  pairingSecondsLeft = 0;
+  ESP_LOGI(kTag, "PAIRING off: %s (bonds_dropped=%d)", reason,
+           pairingBondsDropped);
+  drawScreen();
+}
+
+void updatePairingMode() {
+  if (!pairingMode) return;
+
+  // A board that is advertising and waiting to be paired is in use by
+  // definition, so it must not dim or fall asleep under the user's hands.
+  lastActivityMs = nowMs();
+
+  // The success condition is a *new* connection, not merely a live one. The
+  // gesture is normally used while the old host is still attached -- that is
+  // the whole point -- so `state.connected` is still true for the few hundred
+  // milliseconds it takes the forced disconnect to land. Exiting on that would
+  // close the window before the user ever got to the host's settings screen.
+  // Waiting for the link to be observed down first makes the two cases
+  // distinguishable without depending on event timing.
+  if (!state.connected) pairingSawDisconnect = true;
+
+  if (pairingSawDisconnect && state.connected) {
+    exitPairingMode("host connected");
+    return;
+  }
+
+  const uint32_t now = nowMs();
+  if (static_cast<int32_t>(now - pairingModeUntilMs) >= 0) {
+    exitPairingMode("window expired");
+    return;
+  }
+  pairingSecondsLeft = (pairingModeUntilMs - now + 999) / 1000;
+}
+
 // ------------------------------------------------------------------ button --
 
 void beginButtonPress() {
@@ -723,6 +830,7 @@ void beginButtonPress() {
   buttonPressedAtMs = nowMs();
   lastActivityMs = buttonPressedAtMs;
   micHoldActive = false;
+  buttonPairingConsumed = false;
   buttonWakeConsumed = deskSleeping;
   if (buttonWakeConsumed) {
     buttonGesture.cancel();
@@ -736,8 +844,42 @@ void beginButtonPress() {
 }
 
 void updateButtonHold() {
-  if (!buttonPressed || micHoldActive || buttonWakeConsumed) return;
-  if (nowMs() - buttonPressedAtMs < kMicHoldThresholdMs) return;
+  if (!buttonPressed || buttonWakeConsumed) return;
+  const uint32_t heldMs = nowMs() - buttonPressedAtMs;
+
+  // The pairing thresholds are tested before the push-to-talk early-return, so
+  // that a hold which keeps going past 3 s still ends in pairing mode rather
+  // than leaving the microphone engaged. Push-to-talk has already fired by
+  // then, at 700 ms; the pairing step releases it again on the way in.
+  if (pairingMode) {
+    // Already pairing: a further hold escalates to a fresh Bluetooth address.
+    if (heldMs < kPairingHardResetHoldMs) return;
+    buttonPairingConsumed = true;
+    ESP_LOGW(kTag, "BUTTON hold action=bond_generation_reset hold=%lums",
+             static_cast<unsigned long>(heldMs));
+    if (!codex.resetBondGenerationAndRestart()) {
+      ESP_LOGE(kTag, "bond generation reset failed; staying on this address");
+    }
+    return;
+  }
+  if (heldMs >= kPairingHoldMs) {
+    buttonPairingConsumed = true;
+    if (micHoldActive) {
+      // The mic was engaged by this same hold. Release it before switching
+      // modes, or the host is left with a stuck push-to-talk.
+      micHoldActive = false;
+      micPressed = false;
+      codex.sendKey(kMicSwitchKey, 0);
+      ESP_LOGI(kTag, "BUTTON hold key=%s action=release reason=pairing",
+               kMicSwitchKey);
+    }
+    buttonGesture.cancel();  // A hold cancels a pending first click.
+    enterPairingMode();
+    return;
+  }
+
+  if (micHoldActive) return;
+  if (heldMs < kMicHoldThresholdMs) return;
   // Holding the key is the microphone push-to-talk gesture, mirroring the C152
   // left key. It fires once the double-click window has clearly expired.
   buttonGesture.cancel();  // A hold cancels a pending first click.
@@ -756,6 +898,15 @@ void finishButtonPress() {
     buttonWakeConsumed = false;
     buttonGesture.cancel();
     ESP_LOGI(kTag, "BUTTON wake_only");
+    return;
+  }
+
+  // The hold was spent on the pairing gesture, so its release is not a click.
+  if (buttonPairingConsumed) {
+    buttonPairingConsumed = false;
+    buttonGesture.cancel();
+    ESP_LOGI(kTag, "BUTTON pairing_hold hold=%lums",
+             static_cast<unsigned long>(heldMs));
     return;
   }
 
@@ -784,6 +935,10 @@ void updateButtonGesture() {
   const button_gesture::Event delayed = buttonGesture.poll(nowMs());
   if (delayed != button_gesture::Event::SingleClick) return;
   if (deskSleeping) return;
+  // During the pairing window the board is deliberately unattached, so a
+  // single click has nothing to send to. Swallowing it also means an
+  // accidental tap cannot look like the gesture did something.
+  if (pairingMode) return;
   ESP_LOGI(kTag, "BUTTON single_click key=%s", kSendKey);
   codex.sendKey(kSendKey, 1);
   vTaskDelay(pdMS_TO_TICKS(kTouchKeyPulseMs));
@@ -907,6 +1062,7 @@ void configureButton() {
       detectAgentTransitions(latest);
     }
     state = latest;
+    updatePairingMode();
     updatePowerTelemetry();
     const bool completionBannerExpired = completionBanner.expire(nowMs());
 
@@ -923,6 +1079,10 @@ void configureButton() {
         currentUi.timeValid != renderedTimeValid ||
         currentUi.night != renderedNight ||
         currentUi.setupPortal != renderedSetupPortal ||
+        // The pairing prompt counts down on its own, so it needs the same
+        // treatment as the clock: compare the value that is actually drawn.
+        currentUi.pairing != renderedPairing ||
+        currentUi.pairingSecondsLeft != renderedPairingSeconds ||
         strcmp(currentUi.clock, renderedClock) != 0;
     if (!deskSleeping && !powerOffActive &&
         (shouldRedraw || derivedStateChanged || completionBannerExpired)) {
