@@ -18,11 +18,30 @@ $script:CompanionScript = Join-Path $script:RepoRoot 'windows_companion.py'
 $script:ToolsDir = Join-Path $script:RepoRoot 'tools'
 
 function Get-CompanionConfig {
-    $path = Join-Path $script:CompanionDir 'config.psd1'
-    if (Test-Path -LiteralPath $path) {
-        return Import-PowerShellDataFile -LiteralPath $path
+    <#
+        Return config.psd1 merged over the defaults.
+
+        The merge matters because the callers run under StrictMode: reading a
+        key that a user deleted from config.psd1 would otherwise throw instead
+        of falling back.
+    #>
+    $defaults = @{
+        DeviceAddress   = ''
+        IntervalSeconds = 60
+        WriteAttempts   = 4
+        WriteTimeoutMs  = 12000
+        PythonPath      = ''
+        CodexPath       = ''
     }
-    return @{}
+
+    $path = Join-Path $script:CompanionDir 'config.psd1'
+    if (-not (Test-Path -LiteralPath $path)) { return $defaults }
+
+    $loaded = Import-PowerShellDataFile -LiteralPath $path
+    foreach ($key in @($loaded.Keys)) {
+        $defaults[$key] = $loaded[$key]
+    }
+    return $defaults
 }
 
 function Resolve-Python {

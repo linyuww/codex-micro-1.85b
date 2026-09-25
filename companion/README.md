@@ -20,15 +20,17 @@
 窗口会停在前台，实时打印每次同步的日志。**按 Ctrl+C 停止**。
 关掉窗口 = 停止同步（表盘会停在最后一次的数值上，重启后显示为 `STALE`）。
 
-想让它开机自动跑：
+想让它开机自动跑、并且完全躲在后台：
 
 ```powershell
 cd companion
 .\install-autostart.ps1 -StartNow     # 注册登录自启并立刻启动
-.\uninstall-autostart.ps1              # 取消
+.\status-companion.ps1                # 确认在跑、没有可见窗口
+.\stop-companion.ps1                  # 临时停掉（保留注册）
+.\uninstall-autostart.ps1              # 彻底取消自启
 ```
 
-自启是**当前用户的计划任务**，不需要管理员权限。
+自启是**当前用户的计划任务**，不需要管理员权限。细节见第 3 节。
 
 ---
 
@@ -90,6 +92,74 @@ MAY BE POWERED DOWN
 
 网卡那一项已经是"保持供电"，**板子的 HID 节点仍然允许断电** —— 所以第 2 步还没做完。
 
+### 让它开机自启、常驻后台
+
+```powershell
+.\install-autostart.ps1 -StartNow
+```
+
+它注册一个**当前用户**的计划任务 `CodexMicroAllowanceCompanion`：登录后 30 秒启动，窗口隐藏。
+
+| 参数 | 作用 |
+| --- | --- |
+| `-DelaySeconds 30` | 登录后延迟多少秒启动。蓝牙栈在刚登录时不一定就绪，早启动只是白烧重试 |
+| `-StartNow` | 注册完立刻启动，不用注销重登 |
+| `-Restart` | 已经在跑的话先停再起 |
+
+**为什么是计划任务而不是 Windows 服务**：伴生程序靠 WinRT 蓝牙访问板子，并且读你本机的
+Codex 登录态，两者都在**你的交互会话**里。服务跑在 session 0，那里够不到蓝牙设备，
+结果会是"启动了但什么都同步不了"。
+
+**为什么不会影响前台**：动作里带 `-WindowStyle Hidden`，任务本身也设成 Hidden，
+再加 `-NonInteractive`（保证它永远不会停下来等你输入）。不抢焦点、不上任务栏。
+
+验证：
+
+```powershell
+.\status-companion.ps1
+```
+
+正常时应该看到类似
+
+```
+[ok]   state=Running  logon delay=PT30S
+[ok]   running in the background; nothing takes the foreground (2 process(es))
+         launcher   pid 12345   no visible window
+         companion  pid 23456   no visible window
+```
+
+（`no visible window` 是直接读 `MainWindowHandle == 0` 得出的，不是猜的。）
+
+它每 60 秒才做一次 BLE 写入，其余时间在 sleep，CPU 占用可以忽略。
+
+#### 换任务的坑：别用管理员身份注册
+
+**实测**：如果 `install-autostart.ps1` 是从**管理员**终端跑的，生成的任务文件
+（`C:\Windows\System32\Tasks\<任务名>`）属主会变成 `BUILTIN\Administrators`，
+你的账号只拿到 `Read, Synchronize`。后果是：
+
+- 非管理员终端**删不掉也改不了**它（`Unregister-ScheduledTask` 报"拒绝访问"）
+- 连 `Register-ScheduledTask -Force` 覆盖也被拒
+
+脚本会检测到这种情况并打印该跑的两条管理员命令，不会静默失败。所以：
+
+> **注册自启用普通终端跑就够了**，不需要管理员。
+
+#### 任务本身已经够用，改不动也不要紧
+
+`start-companion.ps1` 每次尝试都会**重新按名字发现板子**，发现不到就等一会儿再试。
+所以下面两件事都不需要动计划任务：
+
+- 开机时蓝牙栈还没就绪 → 脚本自己重试到就绪为止
+- 板子重新烧录换了广播地址 → 脚本下次尝试就用新地址
+
+这也意味着：任务定义里那个 30 秒延迟、`Hidden` 标记、失败重启，都只是锦上添花。
+**旧任务的动作指向的是同一个 `start-companion.ps1`，所以脚本层面的改进对它一样生效。**
+
+**会不会和桌面端抢蓝牙？** 不抢连接，但共用同一条链路。桌面端正在密集读写 HID 时，
+伴生程序的写入可能被 Windows 拒掉（`AccessDenied` / `ERROR_CANCELLED`），脚本会按
+`WriteAttempts` 重试。这是 README 6.11 记录过的现象，属正常。
+
 ---
 
 ## 4. 出问题了按这个顺序查
@@ -123,11 +193,13 @@ MAY BE POWERED DOWN
 companion/
 ├── README.md                  ← 本文件
 ├── config.psd1                ← 唯一需要改的配置
-├── start-companion.cmd        ← 双击：持续同步额度
+├── start-companion.cmd        ← 双击：持续同步额度（前台窗口）
 ├── start-companion.ps1          实现（也可以直接 pwsh 跑）
+├── status-companion.ps1       ← 看后台是否在跑（任务 / 进程 / 日志）
+├── stop-companion.ps1         ← 停掉后台（保留自启注册）
 ├── diagnose.ps1               ← 只读体检
 ├── repair-link.ps1            ← 链路修复（每步都要显式开关）
-├── install-autostart.ps1      ← 注册登录自启
+├── install-autostart.ps1      ← 注册登录自启（隐藏窗口）
 ├── uninstall-autostart.ps1    ← 取消自启
 ├── menu.ps1 / menu.cmd        ← 所有相关程序的编号菜单
 └── logs/                      ← 每次运行的日志（按天一个文件）

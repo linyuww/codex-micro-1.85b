@@ -13,6 +13,12 @@
     supervision timeout and tears the link down, and the cycle repeats. A
     companion that holds the link is the no-admin fix (README 6.14).
 
+    The board address is re-discovered on every attempt rather than resolved
+    once. Two reasons: at logon the Bluetooth stack may still be coming up, and
+    the firmware derives its advertised address from a bond generation byte, so
+    re-flashing the board changes the address. Neither case should require
+    editing a script or a scheduled task.
+
 .PARAMETER Once
     Read and write the allowance exactly once, then exit. Useful as a test.
 
@@ -56,50 +62,41 @@ if (-not $python) {
     exit 2
 }
 
-$address = Get-BoardAddress -Configured $config.DeviceAddress -Python $python
-if (-not $address) {
-    Write-Bad 'The board is not visible to Windows over BLE.'
-    Write-Host ''
-    Write-Host '  Do this first:'
-    Write-Host '    1. Power the board on and wait for its dashboard.'
-    Write-Host '    2. Windows Settings -> Bluetooth & devices -> Add device'
-    Write-Host '       -> pick "Codex Micro".'
-    Write-Host '    3. Re-run this script.'
-    Write-Host ''
-    Write-Host '  If it is already paired, run .\diagnose.ps1 to see which layer is stuck.'
-    exit 3
-}
-
-if ($Interval -le 0) {
-    $Interval = if ($config.IntervalSeconds) { [int] $config.IntervalSeconds } else { 60 }
-}
+if ($Interval -le 0) { $Interval = [int] $config.IntervalSeconds }
 if ($Interval -lt 10) {
     Write-Warn2 "interval $Interval is below the 10 s floor; using 10."
     $Interval = 10
 }
 
-$arguments = @($script:CompanionScript, '--device-address', $address, '-v')
+# Everything except the board address, which is appended per attempt.
+$baseArguments = @('-v')
 if ($Probe) {
-    $arguments += @('--probe-only', '--hold-seconds', '120')
+    $baseArguments += @('--probe-only', '--hold-seconds', '120')
 }
 elseif ($Once) {
-    $arguments += '--once'
+    $baseArguments += '--once'
 }
 else {
-    $arguments += @('--watch', '--interval', "$Interval")
+    $baseArguments += @('--watch', '--interval', "$Interval")
 }
-if ($config.WriteAttempts) { $arguments += @('--write-attempts', "$($config.WriteAttempts)") }
-if ($config.WriteTimeoutMs) { $arguments += @('--write-timeout-ms', "$($config.WriteTimeoutMs)") }
-if ($config.CodexPath) { $arguments += @('--codex-path', $config.CodexPath) }
+if ($config.WriteAttempts) { $baseArguments += @('--write-attempts', "$($config.WriteAttempts)") }
+if ($config.WriteTimeoutMs) { $baseArguments += @('--write-timeout-ms', "$($config.WriteTimeoutMs)") }
+if ($config.CodexPath) { $baseArguments += @('--codex-path', $config.CodexPath) }
 
 $logDirectory = Join-Path $PSScriptRoot 'logs'
 New-Item -ItemType Directory -Force -Path $logDirectory | Out-Null
 $logFile = Join-Path $logDirectory ('companion-{0:yyyy-MM-dd}.log' -f (Get-Date))
 
+function Write-Log {
+    param([Parameter(Mandatory)] [string] $Line)
+    "$((Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))  $Line" |
+        Out-File -LiteralPath $logFile -Append -Encoding utf8
+}
+
 Write-Host ''
 Write-Host '  Codex Micro allowance companion' -ForegroundColor Cyan
 Write-Host "    python  : $python"
-Write-Host "    board   : $address"
+Write-Host "    board   : $(if ($config.DeviceAddress) { $config.DeviceAddress } else { 'auto-detect by name, every attempt' })"
 Write-Host "    mode    : $(if ($Probe) { 'probe only' } elseif ($Once) { 'single write' } else { "watch, every ${Interval}s" })"
 Write-Host "    log     : $logFile"
 Write-Host ''
@@ -109,16 +106,29 @@ Write-Host ''
 $attempt = 0
 while ($true) {
     $attempt++
+
+    # Re-resolved every attempt on purpose -- see the header comment.
+    $address = Get-BoardAddress -Configured $config.DeviceAddress -Python $python
+    if (-not $address) {
+        $wait = [Math]::Min(30 * $attempt, 120)
+        Write-Log "run #$attempt  board not visible over BLE; retrying in ${wait}s"
+        Write-Warn2 "board not visible over BLE; retrying in ${wait}s"
+        if ($Once -or $Probe) {
+            Write-Bad 'Nothing to talk to. Run .\diagnose.ps1 to see which layer is stuck.'
+            exit 3
+        }
+        Start-Sleep -Seconds $wait
+        continue
+    }
+
+    $arguments = @($script:CompanionScript, '--device-address', $address) + $baseArguments
     $started = Get-Date
-    "$($started.ToString('yyyy-MM-dd HH:mm:ss'))  run #$attempt  $python $($arguments -join ' ')" |
-        Out-File -LiteralPath $logFile -Append -Encoding utf8
+    Write-Log "run #$attempt  board=$address  $python $($arguments -join ' ')"
 
     & $python @arguments 2>&1 | Tee-Object -FilePath $logFile -Append
     $code = $LASTEXITCODE
     $ran = ((Get-Date) - $started).TotalSeconds
-
-    "$((Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))  run #$attempt exited code=$code after $([int] $ran)s" |
-        Out-File -LiteralPath $logFile -Append -Encoding utf8
+    Write-Log "run #$attempt exited code=$code after $([int] $ran)s"
 
     if ($Once -or $Probe -or $NoRestart) { exit $code }
 

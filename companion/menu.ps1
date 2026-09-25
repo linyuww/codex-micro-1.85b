@@ -51,7 +51,9 @@ function Get-Entries {
     & $add '查看板子 HID 能力' 'tools\hid_caps.py' @() '应看到 usagePage=0xFF00'
     & $add '按桌面端分帧直发一条 RPC' 'tools\hid_rpc.py' @('--method', 'sys.version', '--listen', '5') ''
     & $add '查看桌面端进程与网卡状态' 'tools\codex_host_state.py' @() ''
-    & $add '注册开机自启（计划任务）' 'install-autostart.ps1' @() ''
+    & $add '查看后台运行状态（任务 / 进程 / 日志）' 'status-companion.ps1' @() '确认常驻是否在跑'
+    & $add '停止后台运行（保留自启注册）' 'stop-companion.ps1' @() ''
+    & $add '注册开机自启（隐藏窗口的计划任务）' 'install-autostart.ps1' @() '不需要管理员'
     & $add '取消开机自启' 'uninstall-autostart.ps1' @() ''
     return $entries
 }
@@ -101,6 +103,12 @@ while ($true) {
         }
         'diagnose.ps1' {
             & (Join-Path $PSScriptRoot 'diagnose.ps1')
+        }
+        'status-companion.ps1' {
+            & (Join-Path $PSScriptRoot 'status-companion.ps1')
+        }
+        'stop-companion.ps1' {
+            & (Join-Path $PSScriptRoot 'stop-companion.ps1')
         }
         'install-autostart.ps1' {
             & (Join-Path $PSScriptRoot 'install-autostart.ps1') -StartNow
