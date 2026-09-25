@@ -4,17 +4,11 @@
 
 之后让其他agent来修改代码，并新增了ui还有配网功能
 
-目前遇到了bug就是虽然蓝牙能连接电脑，但是codex app显示操作受限
-
-![image-20260923172107201](D:/Desktop/my-blog/source/images/image-20260923172107201.png)
+目前遇到了bug就是配对后蓝牙时断时连，即使连接也会显示已连接功能受损
 
 并不能操作app
 
-但是过大概十多分钟后就可以了，所有都显示正常。重启后又是失效然后这样受限
-
-
-
 我需要你解决这个bug，使我连接蓝牙后就能操作codex app，在配对后打开设备只要连接就能操作。
 
-然后目前额度似乎使用的是windows运行“C:\Users\86147\Documents\Codex\2026-09-16\https-github-com-digitsisyph-codex-micro\work\codex-micro-1.85b\windows_companion.py”程序来推送，官方有没有更好的办法
+并把你的debug过程不管成功与否都写入task.md，以便排除错误
 

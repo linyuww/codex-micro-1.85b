@@ -19,3 +19,15 @@ __pycache__/
 # Serial-port/device bindings, host bridge state, recovery images.
 .local/
 *.local.json
+
+# --- WorkBuddy workspace state --------------------------------------------
+# Agent skills and daily memory. Local only: never committed, never pushed.
+.workbuddy-ai/skills/
+.workbuddy-ai/memory/
+
+# --- UI replacement kit ----------------------------------------------------
+# Local tooling and notes for swapping the dashboard art. Kept out of the
+# tree so a restyle never lands in a commit by accident.
+tools/apply_ui_assets.py
+UI_REPLACE.md
+/tmp/
