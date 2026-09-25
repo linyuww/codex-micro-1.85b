@@ -18,6 +18,8 @@
 - **360 × 360 像素仪表盘**：日夜主题、时钟日期、额度环、6 个智能体状态、连接健康度与完成提示。
 - **ChatGPT Desktop 控制**：支持选择智能体、Send、四向滑动、Voice Chat 和 push-to-talk。
 - **BLE HID + 私有遥测协议**：兼容 Codex Micro 的 JSON-RPC 分片协议，并上报真实电量。
+- **按键配对模式**：长按 BOOT 3 秒断开链路、清除绑定并重新可配对（像耳机一样），
+  继续按到 8 秒则换一个蓝牙地址重启，用于救回主机侧卡死的配对记录。
 - **网页配网**：首次启动自动开放 `CODEX-XXXX` 热点，通过手机或电脑浏览器写入 Wi-Fi。
 - **自动校时**：联网后通过 SNTP 获取时间，默认显示 UTC+8。
 - **电源状态识别**：读取 BQ27220 电量计，区分电池供电、外部供电和充电状态。
@@ -106,6 +108,8 @@ python windows_companion.py --device-address xx:xx:xx:xx:xx:xx --watch --interva
 | 屏幕、触摸、音频、按键引脚 | `main/board_config.h` | Waveshare 1.85B 官方 BSP 引脚映射 |
 | 时区与 NTP 服务器 | `main/wifi_time.cpp` | UTC+8；双 NTP 服务器 |
 | 亮度与自动息屏时间 | `main/main.cpp` | 电池：2 分钟变暗、5 分钟息屏；外部供电：10/30 分钟 |
+| 配对手势阈值与配对窗口 | `main/main.cpp` | 长按 3 s 进配对、8 s 换地址重启、窗口 120 s |
+| 蓝牙地址代次（NVS `codex/bond_gen`） | 长按 BOOT 8 s，或 `main/codex_ble.cpp` 的 `kDefaultBondGeneration` | 默认 `0x5D`，对应主机已配对的那个地址 |
 | BLE 加密与调试日志 | `main/codex_ble.cpp` | `CODEX_BLE_REQUIRE_ENCRYPTION`、`CODEX_BLE_TRACE` |
 | UI 布局、颜色和文案 | `main/dashboard_ui.h` | 360 × 360 圆屏布局 |
 | 日夜背景与电池图标 | `main/assets/`、`main/Backgrounds.h`、`main/BatteryIcons.h` | 由 `tools/make_*.py` 生成 |
@@ -179,9 +183,11 @@ I2C 从机地址：ES8311 `0x18`（7 位；BSP 里写的 `0x30` 是 8 位形式�
 
 | 手势 | 动作 | 发出 |
 | --- | --- | --- |
-| **单击** | 息屏 / 唤醒（desk sleep 切换） | — |
+| **单击** | 息屏 / 唤醒（desk sleep 切换）；屏幕亮着时是 Send | — / `ACT12` |
 | **双击** | Voice Chat 短按（对应 C152 右键） | `ACT09` 按下 → 70 ms → 松开 |
 | **长按 ≥ 700 ms** | 麦克风对讲 push-to-talk（对应 C152 左键） | `ACT10` 按下，松手时 `ACT10` 松开 |
+| **长按 ≥ 3 s** | **进入蓝牙配对模式**（断开链路 + 清除全部绑定 + 重新可配对） | — |
+| **长按 ≥ 8 s** | **换一个蓝牙地址重启**（升级手段，见第 4.2 节） | — |
 
 三点说明：
 
@@ -189,6 +195,45 @@ I2C 从机地址：ES8311 `0x18`（7 位；BSP 里写的 `0x30` 是 8 位形式�
 2. **不使用 deep sleep**。唯一的用户按键 GPIO0 是 ROM 下载 strapping 引脚，
    deep sleep 唤醒会重新采样该引脚，可能把芯片带进串口下载模式而不是应用程序。
 3. 因此"关机"是**背光关闭的空闲态**（屏幕黑、CPU 低频轮询），不是真正的断电。
+
+> 长按的四个阈值是**累积**的：按住不放会依次经过 700 ms（麦克风按下）、
+> 3 s（释放麦克风并进入配对模式）、8 s（换地址重启）。所以想进配对模式，
+> 按到屏幕出现 `PAIR` 再松手即可；只想对讲就按到出现 `LISTENING` 就松手。
+
+---
+
+## 3.1 蓝牙配对模式（长按 BOOT 3 秒）
+
+这是本工程为"连上了但不能操作"准备的**按键级自救手段**，等价于按住耳机上的
+配对键：不需要串口、不需要重新烧录、也不需要 Windows 的设备管理器。
+
+| 步骤 | 设备侧 | 主机侧 |
+| --- | --- | --- |
+| 1 | 长按 BOOT 到屏幕出现 `BLUETOOTH / PAIR / CODEX MICRO` | — |
+| 2 | 自动断开当前链路，清掉 NVS 里的全部绑定，重新开始可配对广播 | 打开"设置 → 蓝牙和其他设备 → 添加设备" |
+| 3 | 屏幕显示 `118S LEFT` 倒计时（窗口 120 秒） | 选择 **Codex Micro** 完成配对 |
+| 4 | 收到连接后自动退出配对模式，恢复仪表盘 | 启动 ChatGPT Desktop |
+
+行为细节：
+
+- **窗口 120 秒**。超时后自动回到普通状态（重新开始普通广播），不会一直停在
+  可配对态。
+- **配对窗口内屏幕不休眠**：设备正在被使用，熄屏会让用户看不到提示。
+- **连接即成功退出**：只要主机连上来（无论是否完成配对），提示自动收起。
+- **8 秒是升级手段**：继续按住到 8 秒，设备会把蓝牙地址的代次 +1 写入 NVS 并
+  重启，广播一个**主机从未见过的新地址**。这是 6.13 / 6.16 里那个"记录还在、
+  报未配对、又拒绝重新配对"死锁的解法，原先只能改代码重烧，现在按键即可触发。
+  代价是主机把它当成全新设备，**必须重新配对一次**。
+- 串口日志会明确记录动作，便于确认：
+
+  ```
+  W (…) app: BUTTON hold action=bond_generation_reset hold=8123ms
+  W (…) ble: pairing mode: dropped 2 bond(s), signalled 1 link(s), advertising=1
+  W (…) ble: bond generation 0x5D -> 0x5E (2 bond(s) dropped); restarting …
+  ```
+
+> ⚠️ 屏幕熄灭（desk sleep）时按键的第一下只用于唤醒，不会触发配对模式。
+> 先点亮屏幕，再长按。
 
 ---
 
@@ -239,6 +284,10 @@ report[2..] = 载荷（换行符结尾，每片最多 61 字节）
 3. 配对完成后串口会打印 `ble: pairing complete`，之后链路会一直保持。
 
 已经连过一次、绑定正常的情况下不需要做这些，断电重连会自动恢复。
+
+> 不想开电脑排查的话，**长按 BOOT 3 秒**就是上面第 1~2 步的设备侧版本：
+> 设备会清掉自己这半的绑定并重新可配对，屏幕显示 `BLUETOOTH / PAIR`。
+> 详见 [3.1 蓝牙配对模式](#31-蓝牙配对模式长按-boot-3-秒)。
 
 ### 调试开关
 
@@ -598,10 +647,12 @@ I (…) ble: sendJson chunks=3 failed=0 bytes=143 cccd=0x0001
 （`json==nullptr` / `handle==0` / `!connected()`）也会打 WARN，
 不再和"主机不理我们"混为一谈。
 
-### 6.13 绑定代次（`kBondGeneration`）：主机卡在"未配对"时的唯一出路
+### 6.13 绑定代次（`bond_gen`）：主机卡在"未配对"时的唯一出路
 
-`codex_ble.cpp` 里的 `kBondGeneration`（当前 `0x5B`）是主机侧配对卡死时的
-**唯一可操作旋钮**。
+绑定代次（NVS 键 `codex/bond_gen`，出厂默认 `0x5D`）是主机侧配对卡死时的
+**唯一可操作旋钮**。它原先叫 `kBondGeneration`，是 `codex_ble.cpp` 里的编译期
+常量；现在改由 NVS 保存，因为**长按 BOOT 8 秒**就能在运行时把它 +1 并重启
+（见 3.1），不必再改代码重烧。
 
 主机按地址记绑定。当主机留着一条记录、却把它报成
 `IsPaired=false` 并且**拒绝发起新配对**时，会形成死锁：
@@ -613,9 +664,15 @@ I (…) ble: sendJson chunks=3 failed=0 bytes=143 cccd=0x0001
 | 板子一直在广播 | 广播是 `ADV_FILTER_ALLOW_SCAN_ANY_CON_ANY`，没有白名单，问题不在板子 |
 | Windows 里查不到该设备 | 新地址对 Windows 完全陌生，`FromBluetoothAddressAsync` 返回 null |
 
-**解法**：把 `kBondGeneration` 加一，重新编译烧录。板子会广播一个**新地址**，
-主机把它当成全新设备，配对即可成功——这正是固件原注释里描述的逃生路径，
-现在把它做成了显式常量。
+**解法**：把代次加一。板子会广播一个**新地址**，主机把它当成全新设备，
+配对即可成功——这正是固件原注释里描述的逃生路径。
+
+现在有两条路，**优先用按键那条**：
+
+1. **长按 BOOT 8 秒**（推荐）：设备自己把 `codex/bond_gen` +1、清掉绑定并重启，
+   串口会打印 `bond generation 0x5D -> 0x5E`。不需要电脑、不需要重烧。
+2. 改 `main/codex_ble.cpp` 的 `kDefaultBondGeneration` 重烧：只在 NVS 里的
+   `bond_gen` 还没写过时才会生效，所以用按键触发过之后就不要再走这条。
 
 > ⚠️ **不要把启动日志里的地址当成设备地址用。**
 > 那行打印的是**基址 MAC**（`base MAC set to …`），控制器会在此基础上派生
@@ -991,6 +1048,23 @@ grep -nE "PREVIOUS BOOT|Guru|rst:0x|hcif disc" boot.log
 
 按**从便宜到贵**的顺序走，每一步都能独立判出结论，不要跳步。
 
+**第 -1 步：长按 BOOT 3 秒进配对模式（先试这个）。**
+
+这是不需要任何主机侧工具、也不需要看串口的一步，绝大多数"绑定残留"都停在
+这里。设备会断开链路、清掉自己这半的绑定、重新可配对（详见 3.1）。然后：
+
+```
+Windows 设置 → 蓝牙和其他设备 → 添加设备 → Codex Micro
+```
+
+如果列表里还留着旧的 **Codex Micro** 条目（连不上的那条），顺手删掉。
+配对成功后串口会打印 `ble: pairing complete`。
+
+配对仍然失败、或者 Windows 里那条记录连"删除设备"都不给（报未配对却删不掉），
+**继续按住 BOOT 到 8 秒**：设备会换一个蓝牙地址重启，主机就把它当成一台全新
+设备，配对必然能重新建立。这一步等价于 6.13 里改 `kBondGeneration` 重烧，
+现在按键即可完成。
+
 **第 0 步：先确认到底卡在哪一层。** 桌面上正常的样子是——板子串口出现
 `host connected` → `pairing complete`，随后 `RPC method=v.oai.rgbcfg` /
 `v.oai.thstatus` / `device.status`，每一条后面都跟
@@ -1015,7 +1089,7 @@ python tools/hid_caps.py
 就没成，先解决连接；接口在但桌面端仍报 `0x57`，是绑定残留——固件的
 `clearIncompatibleBondsOnce()` 会在下次启动时自动清一次，**复位板子**即可。
 
-**第 2 步：主机侧不发连接 → 切换蓝牙无线电。**
+**第 2 步：主机侧停止枚举 → 切换蓝牙无线电。（最高收益的一步）**
 
 ```bash
 python tools/bt_radio_toggle.py --status   # 只看状态
@@ -1025,6 +1099,23 @@ python tools/bt_radio_toggle.py            # 关 → 4 秒 → 开
 这是 Windows 蓝牙栈假死的解法（见 6.16）。**所有蓝牙设备会断几秒**，所以它是
 独立工具、不会被伴生程序自动调用。
 
+#### 怎么认出"主机停止枚举"
+
+这是最容易误判的一种坏法，2026-09-25 实测复现过：
+
+| 现象 | 说明 |
+| --- | --- |
+| 串口出现 `pairing complete`，链路能连能读 | 配对是好的，加密也是好的 —— 问题不在绑定 |
+| 主机每次只读**配额(68)、电量(63/64/65)**，HID 句柄(42~60)一个都不读 | Windows 只走了部分枚举 |
+| `tools/ble_host_diag.py` 只有 `BTHLE\DEV_<addr>`，**没有任何 `BTHLEDEVICE\{...}` 子节点** | 从未完成 GATT 枚举，所以没有 HID 节点 |
+| `tools/hid_caps.py` 报 `no HID interface is present` | 桌面端拿不到接口，于是完全静默（它只在 HID 拓扑变化时重扫） |
+| 桌面端日志里 `CodexMicro` **一条都没有** | 不是"连上不能操作"，是"根本没看见设备" |
+
+**不要**因为这个症状去改 `CODEX_BLE_REQUIRE_ENCRYPTION`。实测把它置 0 之后，
+主机读的句柄一个都没变——它从来不是加密问题。切换无线电之后主机一次就完整枚举了
+（句柄 42~68 全读），桌面端立刻开始 `v.oai.rgbcfg → v.oai.thstatus → device.status`
+握手并收到 `{"ok":true}`。
+
 **第 3 步：链路正常但桌面端不发 RPC。**
 
 桌面端在"找不到设备"时**不会安排重连定时器**，只在 HID 拓扑变化时才重新扫描。
@@ -1033,10 +1124,15 @@ python tools/bt_radio_toggle.py            # 关 → 4 秒 → 开
 
 **不要做的事：**
 
-> ⚠️ **不要改 `kBondGeneration`。** Windows 的 `BthLEEnum` 设备节点是按**地址**
-> 索引的，而那个节点才是"自动重连"的依据。改地址 = 让 Windows 认为这块板子
-> 从没出现过，实测两次复位 + 135 秒内 `conns=0`，比残留绑定更糟。
-> 要治绑定不一致，清绑定（`kBondRevision`）就够了。
+> ⚠️ **不要为了"换个地址试试"去动蓝牙地址。** Windows 的 `BthLEEnum` 设备节点
+> 是按**地址**索引的，而那个节点才是"自动重连"的依据。改地址 = 让 Windows
+> 认为这块板子从没出现过，实测两次复位 + 135 秒内 `conns=0`，比残留绑定更糟。
+> 要治绑定不一致，**先清绑定**就够了——也就是第 -1 步的前半段（长按 3 秒）。
+>
+> 只有在清完绑定、主机仍然拒绝重新配对时，才轮到换地址：也就是第 -1 步的
+> 后半段（长按 8 秒）。它是**升级手段，不是首选**，因为代价是必须重新配对一次。
+> 硬件上对应的常量是 `main/codex_ble.cpp` 的 `kDefaultBondGeneration`；改它
+> 重烧同样有效，但按键不需要重烧。
 
 排查过程中另外两个坑：
 
@@ -1057,6 +1153,11 @@ python tools/bt_radio_toggle.py            # 关 → 4 秒 → 开
 - **唤醒/熄屏由单键承担**，因此单击是 desk sleep 切换，不能再用作其他用途。
 - **已连接时不再广播**（6.5 的修复）。如果确实需要伴侣设备同时建立第二条
   连接，要重新设计广播策略，不能简单地在连接事件里重启广播。
+  **可观察到的后果**：ChatGPT 桌面端正常连着的时候，它独占这条链路，
+  `windows_companion.py` 会一直报 `the GATT session never became Active;
+  the board is not connectable right now` —— 这不是额度读取失败
+  （`--json-only` 照样读得到），而是板子没在广播，第二个中心设备进不来。
+  额度写入要在桌面端没占链路的时候做。
 
 ---
 
