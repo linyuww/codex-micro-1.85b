@@ -31,3 +31,7 @@ __pycache__/
 tools/apply_ui_assets.py
 UI_REPLACE.md
 /tmp/
+
+# --- Companion runtime output ----------------------------------------------
+# Per-day launcher logs. Machine-specific ports and addresses live in them.
+companion/logs/
