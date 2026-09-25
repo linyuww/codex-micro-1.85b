@@ -200,25 +200,44 @@ inline Method classify(const cJSON* request) {
 namespace quota_payload {
 
 struct Snapshot {
-  float remainingPercent = 0.0f;
-  std::uint32_t resetInSeconds = 0;
+  float fiveHourRemainingPercent = 0.0f;
+  std::uint32_t fiveHourResetInSeconds = 0;
+  float weeklyRemainingPercent = 0.0f;
+  std::uint32_t weeklyResetInSeconds = 0;
 };
 
 inline bool parse(const cJSON* value, Snapshot& output) {
   if (!cJSON_IsObject(value)) return false;
-  const cJSON* remaining =
-      cJSON_GetObjectItemCaseSensitive(value, "remaining_percent");
-  const cJSON* reset =
-      cJSON_GetObjectItemCaseSensitive(value, "reset_in_seconds");
-  if (!cJSON_IsNumber(remaining) || !cJSON_IsNumber(reset)) return false;
+  const cJSON* fiveHourRemaining = cJSON_GetObjectItemCaseSensitive(
+      value, "five_hour_remaining_percent");
+  const cJSON* fiveHourReset = cJSON_GetObjectItemCaseSensitive(
+      value, "five_hour_reset_in_seconds");
+  const cJSON* weeklyRemaining = cJSON_GetObjectItemCaseSensitive(
+      value, "weekly_remaining_percent");
+  const cJSON* weeklyReset = cJSON_GetObjectItemCaseSensitive(
+      value, "weekly_reset_in_seconds");
+  if (!cJSON_IsNumber(fiveHourRemaining) || !cJSON_IsNumber(fiveHourReset) ||
+      !cJSON_IsNumber(weeklyRemaining) || !cJSON_IsNumber(weeklyReset)) {
+    return false;
+  }
 
-  const double percent = remaining->valuedouble;
-  if (!std::isfinite(percent) || percent < 0.0 || percent > 100.0) return false;
-  const double seconds = reset->valuedouble;
-  if (!std::isfinite(seconds) || seconds < 0.0) return false;
+  const double fiveHourPercent = fiveHourRemaining->valuedouble;
+  const double weeklyPercent = weeklyRemaining->valuedouble;
+  const double fiveHourSeconds = fiveHourReset->valuedouble;
+  const double weeklySeconds = weeklyReset->valuedouble;
+  if (!std::isfinite(fiveHourPercent) || fiveHourPercent < 0.0 ||
+      fiveHourPercent > 100.0 || !std::isfinite(weeklyPercent) ||
+      weeklyPercent < 0.0 || weeklyPercent > 100.0 ||
+      !std::isfinite(fiveHourSeconds) || fiveHourSeconds < 0.0 ||
+      !std::isfinite(weeklySeconds) || weeklySeconds < 0.0) {
+    return false;
+  }
 
-  output.remainingPercent = static_cast<float>(percent);
-  output.resetInSeconds = static_cast<std::uint32_t>(seconds);
+  output.fiveHourRemainingPercent = static_cast<float>(fiveHourPercent);
+  output.fiveHourResetInSeconds =
+      static_cast<std::uint32_t>(fiveHourSeconds);
+  output.weeklyRemainingPercent = static_cast<float>(weeklyPercent);
+  output.weeklyResetInSeconds = static_cast<std::uint32_t>(weeklySeconds);
   return true;
 }
 

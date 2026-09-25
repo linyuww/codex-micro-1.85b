@@ -9,7 +9,7 @@
 //
 // The blobs are stored in panel byte order (high byte first), exactly like the
 // framebuffer, so drawing one is a row-wise memcpy with no per-pixel work. See
-// tools/make_backgrounds.py.
+// scripts/assets/make_backgrounds.py.
 
 #pragma once
 

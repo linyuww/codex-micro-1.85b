@@ -18,7 +18,7 @@
 // walking single rows and columns looking for a saturated accent hue. Bounding
 // boxes were not usable -- the background art bleeds into them.
 //
-// tools/pixel_preview.py is the reference implementation of this same layout.
+// scripts/assets/pixel_preview.py is the reference implementation of this same layout.
 // The two are meant to agree pixel for pixel, so anything changed here should
 // be changed there too, and vice versa.
 
@@ -44,6 +44,15 @@ namespace dashboard {
 constexpr int kWidth = 360;
 constexpr int kHeight = 360;
 constexpr int kCenterX = 180;
+
+// The outer segmented ring is the weekly allowance. The active arc begins at
+// 12 o'clock and advances clockwise, matching the physical gauge in the
+// supplied design. Sixty segments keep the progress legible without turning
+// the pixel-art edge into a smooth smartwatch arc.
+constexpr int kQuotaRingOuterRadius = 178;
+constexpr int kQuotaRingInnerRadius = 171;
+constexpr int kQuotaRingSegments = 60;
+constexpr float kQuotaRingSegmentDegrees = 4.2f;
 
 // Clock and date. The clock is 4x the 8 px em, which is a bit-exact upscale
 // and lands within a pixel of the mockup's 31 px cap height; the date stays at
@@ -165,7 +174,7 @@ struct ThreadVisual {
 };
 
 // A premultiplied icon texture: colour words and a coverage plane. The two
-// arrays are generated side by side by tools/make_icon_textures.py, so they
+// arrays are generated side by side by scripts/assets/make_icon_textures.py, so they
 // are always the same length and always belong together.
 struct IconTexture {
   const std::uint16_t* words;
@@ -179,8 +188,9 @@ struct State {
   bool externalPower = false;
   bool quotaAvailable = false;
   bool quotaStale = false;
-  float remainingPercent = 0.0f;
-  std::uint32_t resetInSeconds = 0;
+  float fiveHourRemainingPercent = 0.0f;
+  std::uint32_t fiveHourResetInSeconds = 0;
+  float weeklyRemainingPercent = 0.0f;
   bool micPressed = false;
   bool voicePressed = false;
   bool sendPressed = false;
@@ -368,6 +378,24 @@ inline void drawClockAndDate(gfx::Canvas& canvas, const State& state) {
                           kDateOutline, kSmallScale);
 }
 
+inline void drawWeeklyQuotaRing(gfx::Canvas& canvas, const State& state) {
+  if (state.setupPortal || state.pairing) return;
+
+  const float remaining =
+      std::max(0.0f, std::min(100.0f, state.weeklyRemainingPercent));
+  const int activeSegments = state.quotaAvailable
+      ? static_cast<int>(std::ceil(remaining * kQuotaRingSegments / 100.0f))
+      : 0;
+  const std::uint16_t activeColor = state.quotaStale
+      ? kMuted
+      : (remaining <= 20.0f ? kWarning : kFrame);
+
+  canvas.fillSegmentedRing(kCenterX, kHeight / 2, kQuotaRingOuterRadius,
+                           kQuotaRingInnerRadius, kQuotaRingSegments,
+                           kQuotaRingSegmentDegrees, activeSegments,
+                           activeColor, kTrack);
+}
+
 inline void drawBattery(gfx::Canvas& canvas, std::int8_t percent,
                        bool externalPower) {
   const gfx::Font& font = pixelFont();
@@ -499,7 +527,8 @@ inline void drawPanel(gfx::Canvas& canvas, const State& state) {
   char quota[8];
   if (state.quotaAvailable) {
     std::snprintf(quota, sizeof(quota), "%.0f%%",
-                  std::max(0.0f, std::min(100.0f, state.remainingPercent)));
+                  std::max(0.0f,
+                           std::min(100.0f, state.fiveHourRemainingPercent)));
   } else {
     std::snprintf(quota, sizeof(quota), "--");
   }
@@ -521,7 +550,9 @@ inline void drawPanel(gfx::Canvas& canvas, const State& state) {
     std::snprintf(countdown, sizeof(countdown), "NO QUOTA");
     countdownColor = kMuted;
   } else {
-    formatReset(state.resetInSeconds, countdown, sizeof(countdown));
+    char reset[12];
+    formatReset(state.fiveHourResetInSeconds, reset, sizeof(reset));
+    std::snprintf(countdown, sizeof(countdown), "5H %s", reset);
   }
   canvas.drawTextInteger(font, countdown, kCenterX, kCountdownY,
                          gfx::Datum::MiddleCenter, countdownColor, kSmallScale);
@@ -666,6 +697,7 @@ inline void render(gfx::Canvas& canvas, const State& state) {
     canvas.fillScreen(kBackground);
   }
 
+  drawWeeklyQuotaRing(canvas, state);
   drawClockAndDate(canvas, state);
   drawPanel(canvas, state);
   drawAgentKeys(canvas, state);

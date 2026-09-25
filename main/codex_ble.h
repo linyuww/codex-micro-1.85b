@@ -38,8 +38,10 @@ struct ThreadLight {
 };
 
 struct QuotaState {
-  float remainingPercent = 0.0f;
-  uint32_t resetInSeconds = 0;
+  float fiveHourRemainingPercent = 0.0f;
+  uint32_t fiveHourResetInSeconds = 0;
+  float weeklyRemainingPercent = 0.0f;
+  uint32_t weeklyResetInSeconds = 0;
   uint32_t receivedAtMs = 0;
   bool available = false;
   // True when the values above were loaded from NVS rather than received from a

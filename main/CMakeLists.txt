@@ -35,7 +35,7 @@ idf_component_register(
 )
 
 # The two 360x360 scene backgrounds, as raw RGB565 in panel byte order.
-# Regenerate with `python tools/make_backgrounds.py`.
+# Regenerate with `python scripts/assets/make_backgrounds.py`.
 # Each is 259,200 bytes; they land in flash as rodata and are read directly
 # through the flash cache, so no RAM copy is needed.
 target_add_binary_data(${COMPONENT_LIB} "assets/bg_day.bin" BINARY)

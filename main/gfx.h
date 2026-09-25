@@ -60,6 +60,9 @@ class Canvas {
   // Angles in degrees, 0 at 12 o'clock, increasing clockwise.
   void fillRingArc(int cx, int cy, int rOuter, int rInner, float startDeg,
                    float endDeg, uint16_t color);
+  void fillSegmentedRing(int cx, int cy, int rOuter, int rInner, int segments,
+                         float segmentDegrees, int activeSegments,
+                         uint16_t activeColor, uint16_t inactiveColor);
   void fillRoundRect(int x, int y, int w, int h, int radius, uint16_t color);
   void fillTriangle(int x0, int y0, int x1, int y1, int x2, int y2,
                     uint16_t color);
@@ -69,7 +72,7 @@ class Canvas {
   // discrete steps. `cut` is how many steps, `step` how many pixels of inset
   // each one contributes, so the outermost row is inset by cut * step and the
   // level shrinks by `step` per row until it vanishes. Both mirror
-  // tools/pixel_preview.py's pixel_rect()/pixel_frame() exactly, so the PC
+  // scripts/assets/pixel_preview.py's pixel_rect()/pixel_frame() exactly, so the PC
   // preview and the panel agree pixel for pixel.
   void fillPixelRect(int x, int y, int w, int h, uint16_t color, int cut,
                      int step = 2);
@@ -78,7 +81,7 @@ class Canvas {
 
   // Copies a raw RGB565 image straight into the framebuffer. The source must
   // already be in panel byte order (high byte first), which is how
-  // tools/make_backgrounds.py writes it -- so this is a row-wise memcpy with
+  // scripts/assets/make_backgrounds.py writes it -- so this is a row-wise memcpy with
   // no per-pixel work. `sourceWidth` is the source's row stride in pixels.
   // There is no scale parameter on purpose: the scene art has no consistent
   // pixel grid to snap to, so it is stored at native 360x360 and blitted 1:1.
