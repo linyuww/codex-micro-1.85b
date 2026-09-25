@@ -19,3 +19,8 @@ __pycache__/
 # Serial-port/device bindings, host bridge state, recovery images.
 .local/
 *.local.json
+
+# --- Assistant working notes ----------------------------------------------
+# Per-session debugging logs and project memory. Kept on disk, never shared:
+# they name this machine's ports, addresses and dead ends.
+.workbuddy-ai/
