@@ -24,3 +24,10 @@ __pycache__/
 # Per-session debugging logs and project memory. Kept on disk, never shared:
 # they name this machine's ports, addresses and dead ends.
 .workbuddy-ai/
+
+# --- UI replacement kit ----------------------------------------------------
+# Local tooling and notes for swapping the dashboard art. Kept out of the
+# tree so a restyle never lands in a commit by accident.
+tools/apply_ui_assets.py
+UI_REPLACE.md
+/tmp/

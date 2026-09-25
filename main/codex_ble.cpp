@@ -128,7 +128,7 @@ bool loadQuotaSnapshot(QuotaState& quota) {
 // encrypted permissions back in place, makes Windows re-pair on the next
 // connection instead of waiting.
 constexpr char kBondNvsKey[] = "bond_rev";
-constexpr uint8_t kBondRevision = 4;
+constexpr uint8_t kBondRevision = 5;
 
 void clearIncompatibleBondsOnce() {
   nvs_handle_t handle = 0;
@@ -180,11 +180,11 @@ void clearIncompatibleBondsOnce() {
 // only by reflashing. It now lives in NVS so the BOOT key can trigger it at
 // runtime -- see CodexMicroBle::resetBondGenerationAndRestart().
 //
-// The default reproduces the address every build since 2026-09-23 has
-// advertised (0x5D), so a board that is already paired keeps its bond across
-// this change; the key only appears in NVS once the button is used.
+// The default is 0x5E, the one-time migration to the first image that starts
+// SMP at connect time (see CodexMicroBle::begin()). Boards flashed with 0x5D
+// must re-pair once; the key only appears in NVS once the BOOT key is used.
 constexpr char kBondGenerationNvsKey[] = "bond_gen";
-constexpr uint8_t kDefaultBondGeneration = 0x5D;
+constexpr uint8_t kDefaultBondGeneration = 0x5E;
 
 uint8_t loadBondGeneration() {
   nvs_handle_t handle = 0;
@@ -899,7 +899,7 @@ void gattsCallback(esp_gatts_cb_event_t event, esp_gatt_if_t gattsIf,
       break;
     }
 
-    case ESP_GATTS_CONNECT_EVT:
+    case ESP_GATTS_CONNECT_EVT: {
       rememberConnection(param->connect.conn_id, param->connect.remote_bda);
       g_advertising = false;
       g_advertisingStartPending = false;
@@ -908,45 +908,24 @@ void gattsCallback(esp_gatts_cb_event_t event, esp_gatt_if_t gattsIf,
         g_instance->onConnectionEvent(true, param->connect.conn_id);
       }
       logConnectionParameters(param->connect.remote_bda);
-      // Do NOT call esp_ble_set_encryption() here.
-      //
-      // It looks like the obvious way to shorten the gap between "connected"
-      // and "operable", but as a peripheral it does the opposite. In
-      // btm_ble_set_encryption() (stack/btm/btm_ble.c) the BTM_BLE_SEC_ENCRYPT
-      // case only starts link-layer encryption when the local role is master
-      // *and* a stored LTK is present:
-      //
-      //     case BTM_BLE_SEC_ENCRYPT:
-      //         if (link_role == BTM_ROLE_MASTER && (key_type & BTM_LE_KEY_PENC)) {
-      //             cmd = btm_ble_start_encrypt(bd_addr, FALSE, NULL);
-      //             break;
-      //         }
-      //     /* if salve role then fall through to call SMP_Pair below */
-      //     case BTM_BLE_SEC_ENCRYPT_NO_MITM:
-      //     case BTM_BLE_SEC_ENCRYPT_MITM:
-      //         ...
-      //         if (SMP_Pair(bd_addr) == SMP_STARTED) { ... }
-      //
-      // A peripheral is always BTM_ROLE_SLAVE, so the first branch never
-      // matches and control always reaches SMP_Pair(): the board sends an SMP
-      // Security Request microseconds after the connection event. A host that
-      // still holds a stale bond answers nothing, SMP fails with
-      // ESP_AUTH_SMP_CONN_TOUT (fail_reason 102), Bluedroid drops its bond
-      // record, the host tears the link down (reason 0x13) and reconnects
-      // immediately -- an endless 1-2 s connect/disconnect loop. Measured, not
-      // theorised.
-      //
-      // The upstream reference implementation never calls this API. Encryption
-      // is driven by the host instead: the HID report characteristics are
-      // declared with ESP_GATT_PERM_*_ENCRYPTED (see kHidPermRead/kHidPermWrite
-      // above), so the host's first report access fails with "insufficient
-      // encryption", which is exactly what makes Windows resume encryption
-      // from a stored LTK or start a fresh Just Works pairing.
-      // Windows' own HID parameters are good enough; an explicit peripheral
-      // update request often times out and can leave the HID stack in a
-      // connected-but-not-usable state until Windows retries minutes later.
+      // Start security before the desktop app can issue its first HID write.
+      // Windows opens the cached HID node and writes v.oai.rgbcfg immediately
+      // after the ACL link appears. Relying only on the encrypted attribute
+      // permission starts SMP too late: that first WriteFile completes with
+      // ERROR_INVALID_PARAMETER, the app closes the HID handle, and the link
+      // falls into a reconnect/timeout loop. NO_MITM matches this display-less
+      // device's Just Works bond and resumes a stored LTK on later boots.
+      const esp_err_t security = esp_ble_set_encryption(
+          param->connect.remote_bda, ESP_BLE_SEC_ENCRYPT_NO_MITM);
+      if (security != ESP_OK) {
+        ESP_LOGW(kTag, "security start failed id=%u: %s",
+                 param->connect.conn_id, esp_err_to_name(security));
+      } else {
+        ESP_LOGI(kTag, "security requested id=%u", param->connect.conn_id);
+      }
       ESP_LOGI(kTag, "host connected id=%u", param->connect.conn_id);
       break;
+    }
 
     // Service discovery shows up here; without this the link can look idle
     // even though the host is walking the attribute table.
@@ -1122,8 +1101,14 @@ esp_err_t CodexMicroBle::begin() {
   //
   // Read from NVS instead of being compiled in, because the BOOT key can now
   // bump it at runtime: see resetBondGenerationAndRestart(). An unprogrammed
-  // key yields kDefaultBondGeneration, which is the address this build has
-  // always advertised, so an already-paired board is unaffected.
+  // key yields kDefaultBondGeneration.
+  //
+  // Generation 0x5D reached the same Windows failure state described above
+  // during the pre-security-request firmware: its HID PDO was removed after
+  // repeated 0x57 writes. 0x5E is the one-time migration to the first image
+  // that starts SMP at connect time, so kDefaultBondGeneration now carries
+  // 0x5E. Keep it stable after release so a normal firmware update never
+  // changes the paired identity.
   const uint8_t kBondGeneration = loadBondGeneration();
   uint8_t factoryMac[6] = {};
   if (esp_efuse_mac_get_default(factoryMac) == ESP_OK) {
