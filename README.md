@@ -106,7 +106,7 @@ python windows_companion.py --device-address xx:xx:xx:xx:xx:xx --watch --interva
 | 屏幕、触摸、音频、按键引脚 | `main/board_config.h` | Waveshare 1.85B 官方 BSP 引脚映射 |
 | 时区与 NTP 服务器 | `main/wifi_time.cpp` | UTC+8；双 NTP 服务器 |
 | 亮度与自动息屏时间 | `main/main.cpp` | 电池：2 分钟变暗、5 分钟息屏；外部供电：10/30 分钟 |
-| BLE 加密与调试日志 | `main/codex_ble.cpp` | `CODEX_BLE_REQUIRE_ENCRYPTION`、`CODEX_BLE_TRACE` |
+| BLE 加密、绑定与调试日志 | `main/codex_ble.cpp` | `CODEX_BLE_REQUIRE_ENCRYPTION`（默认 1）、`CODEX_BLE_TRACE`（默认 0）、`CODEX_BLE_BOND_REVISION`（默认 0=不清绑定）、`CODEX_BLE_SECURITY_ON_CONNECT`（默认 0） |
 | UI 布局、颜色和文案 | `main/dashboard_ui.h` | 360 × 360 圆屏布局 |
 | 日夜背景与电池图标 | `main/assets/`、`main/Backgrounds.h`、`main/BatteryIcons.h` | 由 `tools/make_*.py` 生成 |
 | 额度同步周期与重试 | `windows_companion.py` 命令行参数 | `--interval`、`--write-attempts`、`--write-timeout-ms` |
@@ -225,14 +225,22 @@ report[2..] = 载荷（换行符结尾，每片最多 61 字节）
 
 ### ⚠️ 首次使用必须让主机重新配对
 
-配额特征 `...5c02` 与 HID 输入报告都是**加密访问**，所以链路必须先完成配对。
-如果主机里留着一条**旧绑定**（例如板子重新烧录过、NVS 被清过），
-主机就会一直拿旧密钥去恢复加密、又一直失败，表现是**连上就断、额度永远同步不了**。
-详细日志分析见第 6.6 节。
+配额特征 `...5c02` 与 HID 报告特征都是**加密访问**，所以链路必须先完成配对。
 
-因此本工程给板子用了一个**从出厂 MAC 派生出的独立蓝牙地址**
-（`codex_ble.cpp` 里的 `esp_base_mac_addr_set()`），主机因此会把它当成一台新设备，
-不会再复用那条坏掉的绑定。第一次使用请：
+**配对状态是这条链路里最脆的一环。** 绑定有两半：主机按地址存一半，板子按对端地址存一半。
+任一侧重新烧录、擦 NVS 或换地址，两半就对不上。表现不是「连不上」，而是
+**「连上了，但 Codex 里显示『已连接，功能受限』，要等十来分钟才好」**：
+
+```text
+I (5011) ble: connected peer e0:0a:f6:80:71:d2
+I (5011) ble: host connected id=0 bonds=0      ← 板子这半是空的，主机那半还在
+```
+
+链路建得起来，但永远不加密；桌面端第一次 HID 写入被本地拒掉
+（`hid_write/GetOverlappedResult: (0x00000057)`），于是显示功能受限。
+Windows 会自己修这条记录，但**按它自己的节奏**——本机实测 **9 分 40 秒**。
+
+第一次使用请：
 
 1. Windows：设置 → 蓝牙和其他设备 → **添加设备** → 选择 **Codex Micro**，完成配对；
 2. 如果列表里还留着旧的 **Codex Micro** 条目（连不上的那条），顺手删掉即可；
@@ -240,12 +248,19 @@ report[2..] = 载荷（换行符结尾，每片最多 61 字节）
 
 已经连过一次、绑定正常的情况下不需要做这些，断电重连会自动恢复。
 
+> **本工程默认不再自动清绑定。** 早期版本用「绑定代次迁移」（`kBondRevision`）在启动时
+> 清空板子这半的绑定，想借此逼主机重新配对——结果是每烧录一次就把用户已经配好的绑定毁一次，
+> 正是「重启后又失效」的来源。现在 `CODEX_BLE_BOND_REVISION` 默认为 `0`（关闭），
+> 只有显式定义该宏并重新编译才会触发一次。详见第 6.17 节。
+
 ### 调试开关
 
 | 开关 | 位置 | 作用 |
 | --- | --- | --- |
 | `CODEX_BLE_REQUIRE_ENCRYPTION` | `main/codex_ble.cpp` | 置 0 可让 HID / 配额特征接受明文读写，用于排除配对问题 |
 | `CODEX_BLE_TRACE` | `main/codex_ble.cpp` | 置 1 并开启 `CONFIG_LOG_MAXIMUM_LEVEL_DEBUG`，打印 HCI / SMP / ATT 细节 |
+| `CODEX_BLE_BOND_REVISION` | `main/codex_ble.cpp` | 默认 `0`（不清绑定）。设为比 NVS 里已存值更大的数，才会在启动时清一次绑定 |
+| `CODEX_BLE_SECURITY_ON_CONNECT` | `main/codex_ble.cpp` | 默认 `0`。置 1 会在连接事件里发 SMP Security Request——**实测更糟**，见 6.17 |
 
 ---
 
@@ -956,6 +971,92 @@ I (3192) ble: host disconnected id=0 reason=0x13    ← 45 ms，中间没有任�
 > 确认框的调用方），此时板子串口连一条 `host connected` 都不会出现。
 > `--repair-pairing` 因此只能修"已配对但坏了"的记录，不能从零建立配对。
 
+### 6.17 为什么"功能受限"要等十分钟：绑定迁移自己造成的
+
+用户报告的原话是：**「蓝牙能连上电脑，但 Codex 显示操作受限；过大概十多分钟后就可以了，
+重启后又是失效」**。这一节是 2026-09-25 复现并量化后的结论。
+
+#### 现象
+
+桌面端设置页显示「已连接，功能受限 —— Codex Micro 输入仍可用，但灯光和电量更新暂时不可用」，
+应用日志每 3 秒刷一轮：
+
+```text
+info  [CodexMicroService] Connecting with HID
+error [CodexMicroService] Error sending message: {}
+error [CodexMicroService] WRITE_FAILED
+      Cannot write to hid device: hid_write/GetOverlappedResult: (0x00000057)
+error [CodexMicroService] could not read from HID device:
+      hid_read_timeout/GetOverlappedResult: (0x0000048F)
+```
+
+#### 量化：同一天里"好"与"坏"只差绑定状态
+
+| 日期 | 应用启动 | 第一次握手成功 | 间隔 |
+| --- | --- | --- | --- |
+| 09-23 | 02:43:46.069 | 02:43:46.241 | **175 ms** |
+| 09-25 | 02:46:21.507 | 02:56:01.660 | **9 分 40 秒** |
+
+同一份固件、同一台机器、同一条协议。差别只有一个：09-25 之前刚做过一次
+`kBondRevision` 迁移，板子那半的绑定被清空，而 Windows 那半还留着旧 LTK。
+
+板子串口在 09-25 的连接日志里直接写着 `bonds=0`——这就是判据。
+
+#### 为什么"重启后又失效"
+
+`kBondRevision` 每被加一，启动时就会清一次绑定。开发过程中它从 2 一路加到 5，
+于是**每一次重新烧录都把用户已经配好的绑定毁掉一次**，用户看到的就是"重启后又不行了"。
+
+#### 为什么"十多分钟后自己好了"
+
+Windows 会修复这条不一致的记录，但按它自己的调度走，本机实测 9 分 40 秒。
+修好之后一切正常——这就是"过一会就好了"。
+
+#### 不要用 Security Request 去"加速"
+
+看起来最自然的修法是：在 `ESP_GATTS_CONNECT_EVT` 里主动请求加密，让链路早点加密好。
+**实测更糟，已明确否决。** 板子发 SMP Security Request 之后：
+
+```text
+I (5011) ble: connected peer e0:0a:f6:80:71:d2
+I (5011) ble: security requested id=0
+I (5011) ble: host connected id=0 bonds=0
+W (5026) BT_APPL: bta_dm_ble_smp_cback remove bond,rsn 102, BDA:0xE00AF68071D2
+E (5027) BT_BTM: Device not found
+W (5027) BT_HCI: hcif disc complete: hdl 0x1, rsn 0x13
+I (5028) ble: host disconnected id=0 reason=0x13     ← 16 ms
+W (5029) ble: pairing failed reason=0x66             ← 102 = ESP_AUTH_SMP_CONN_TOUT
+```
+
+主机**根本不回答**这个请求（`rsn 102` 是本地超时），直接拆链，然后无限循环。
+换句话说，主动请求安全把"十分钟后能用"变成了"永远不能用"。
+
+而且从实现上也绕不过去：peripheral 恒为 `BTM_ROLE_SLAVE`，
+`btm_ble_set_encryption()` 里只有 master 分支会直接启动链路层加密，其余分支一律
+fall through 到 `SMP_Pair()`——`ESP_BLE_SEC_ENCRYPT` 和 `ESP_BLE_SEC_ENCRYPT_NO_MITM`
+最终发出的是同一个包。上游参考实现从不调用这个 API。
+
+#### 修复
+
+1. **默认不清绑定**（`CODEX_BLE_BOND_REVISION = 0`）。常规烧录绝不能再毁掉配对。
+2. **不在连接事件里请求安全**（`CODEX_BLE_SECURITY_ON_CONNECT = 0`）。
+3. 连接日志加 `bonds=N`，一眼判断绑定是否还在。
+
+绑定已经坏掉时的恢复步骤：
+
+```bash
+# 1) 清掉主机那半（Unpaired 那一步是关键，pair=Failed 是预期行为）
+python windows_companion.py --device-address 28:84:85:B2:1C:73 --repair-pairing -v
+
+# 2) 在 Windows「设置 → 蓝牙和其他设备 → 添加设备」里配对一次
+
+# 3) 验证：重启板子后应立刻可用，串口里 bonds=1
+```
+
+> `UnpairAsync` 确实会连 LTK 一起删掉——实测清完之后
+> `BluetoothLEDevice.FromBluetoothAddressAsync()` 反而查不到这个地址了，
+> 这正是"记录干净"的表现。它也是唯一一条不需要管理员就能清掉坏记录的路。
+
 ---
 
 ## 7. 遇到重启怎么查
@@ -1031,12 +1132,30 @@ python tools/bt_radio_toggle.py            # 关 → 4 秒 → 开
 所以只要让它看到一次 HID 接口的出现/消失即可——重新插拔是没用的（板子不是 USB
 设备），改用切换蓝牙无线电，或者直接重启桌面端。
 
+**第 4 步：板子串口有 `host connected` 但 `bonds=0` → 绑定两半不一致。**
+
+这是"连上了但功能受限、要等十来分钟"的唯一原因，处理办法见 6.17：
+
+```bash
+python windows_companion.py --device-address <addr> --repair-pairing -v
+# 然后在「设置 → 蓝牙和其他设备 → 添加设备」里配对一次
+```
+
 **不要做的事：**
 
-> ⚠️ **不要改 `kBondGeneration`。** Windows 的 `BthLEEnum` 设备节点是按**地址**
-> 索引的，而那个节点才是"自动重连"的依据。改地址 = 让 Windows 认为这块板子
-> 从没出现过，实测两次复位 + 135 秒内 `conns=0`，比残留绑定更糟。
-> 要治绑定不一致，清绑定（`kBondRevision`）就够了。
+> ⚠️ **不要改 `kBondGeneration`，除非 `--repair-pairing` 也救不回来。**
+> Windows 的 `BthLEEnum` 设备节点是按**地址**索引的，而那个节点才是"自动重连"的依据。
+> 改地址 = 让 Windows 认为这块板子从没出现过，实测两次复位 + 135 秒内 `conns=0`，
+> 而且之后必须手动配对一次。先用 `--repair-pairing` 清主机那半——它连 LTK 一起删，
+> 实测有效。
+
+> ⚠️ **不要为了"加速加密"在连接事件里加 `esp_ble_set_encryption()`。**
+> 绑定健康时不需要（主机自己在 ACL 建立时就用 LTK 加密完了）；绑定不一致时
+> 它把链路打成 16 ms 一轮的断连循环，比什么都不做更糟。实测数据见 6.17。
+
+> ⚠️ **不要动 `CODEX_BLE_BOND_REVISION`。** 它默认 `0`（不清绑定）。一旦显式定义并烧录，
+> 板子这半的绑定就被清空，用户必须重新配对，而且在主机修好记录之前会经历一段功能受限。
+> 这不是"重置一下更干净"，而是亲手制造 6.17 那个 bug。
 
 排查过程中另外两个坑：
 
