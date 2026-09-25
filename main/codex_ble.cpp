@@ -915,6 +915,15 @@ void gattsCallback(esp_gatts_cb_event_t event, esp_gatt_if_t gattsIf,
       // ERROR_INVALID_PARAMETER, the app closes the HID handle, and the link
       // falls into a reconnect/timeout loop. NO_MITM matches this display-less
       // device's Just Works bond and resumes a stored LTK on later boots.
+      //
+      // COUNTER-EVIDENCE, kept deliberately: README section 6.16 records a
+      // measured run where this call produced the opposite -- because a
+      // peripheral is always BTM_ROLE_SLAVE, btm_ble_set_encryption() skips
+      // the start-encrypt branch and falls through to SMP_Pair(), so the board
+      // emits an SMP Security Request microseconds after the connection event.
+      // Against a host holding a stale bond that failed as
+      // ESP_AUTH_SMP_CONN_TOUT (102) -> reason 0x13 -> immediate reconnect, a
+      // 1-2 s loop. If that loop comes back, this is the first line to remove.
       const esp_err_t security = esp_ble_set_encryption(
           param->connect.remote_bda, ESP_BLE_SEC_ENCRYPT_NO_MITM);
       if (security != ESP_OK) {
