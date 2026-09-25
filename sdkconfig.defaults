@@ -94,3 +94,9 @@ CONFIG_LWIP_SNTP_UPDATE_DELAY=3600000
 CONFIG_HTTPD_MAX_REQ_HDR_LEN=2048
 
 CONFIG_COMPILER_OPTIMIZATION_PERF=y
+
+# Bluetooth host/controller trace in codex_ble.cpp (CODEX_BLE_TRACE) is off by
+# default; when it is turned on for a bring-up session, also uncomment this so
+# the DEBUG statements are actually compiled in. It is left off here because it
+# roughly doubles the size of the BT host log strings.
+# CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y

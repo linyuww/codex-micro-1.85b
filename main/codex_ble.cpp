@@ -113,32 +113,69 @@ bool loadQuotaSnapshot(QuotaState& quota) {
 // that characteristic is deliberately unencrypted -- which is exactly why
 // "Bluetooth reads the battery fine but nothing works".
 //
-// A board reset only clears this board's half, so the fault returns as soon as
-// the host's stale half is consulted again. The cure is to drop every stored
-// bond exactly once, so both halves start clean; the host then pairs from
-// scratch. Keep the revision in NVS rather than deriving it from the image,
-// because it has to survive reboots without firing on every boot -- otherwise
-// the host would be forced to re-pair forever.
+// Dropping this board's half does NOT restore service on its own. It was used
+// repeatedly during bring-up (revisions 2 through 5) and every bump produced
+// exactly the symptom it was meant to cure, because the host still holds the
+// other half: Windows keeps an LTK the board can no longer answer for, and the
+// device then sits in "connected with limited functionality" until Windows
+// repairs the record on its own schedule -- measured at ~10 minutes on this
+// machine, which is the user-visible "Bluetooth is connected but the app cannot
+// control anything for ten minutes" bug.
 //
-// Revision 4 exists to recover from the revision-3 era, which left the two
-// halves inconsistent in a way Windows reports as "unpaired" while still
-// refusing to pair again: the HID node stays up, every output report write
-// fails, and the device sits in "connected with limited functionality" until
-// Windows repairs the bond by itself. Dropping this half once, with the
-// encrypted permissions back in place, makes Windows re-pair on the next
-// connection instead of waiting.
+// What actually clears that state is dropping the *host's* half. That is a
+// host-side operation, and the project already ships the tool for it:
+//
+//     python windows_companion.py --device-address <addr> --repair-pairing
+//
+// `UnpairAsync` removes the Windows record and the stale LTK with it. The
+// `pair` half of that command fails from a console process (Windows requires a
+// UI owner for the ConfirmOnly consent), so the board is then paired once
+// through Settings -> Bluetooth -> Add device. After that the bond is intact on
+// both sides, the host resumes encryption at connection setup, and every later
+// reboot or reconnect is immediately operable -- measured on 2026-09-23, where
+// the desktop app completed its `v.oai.rgbcfg` handshake 175 ms after opening
+// the HID node.
+//
+// So this migration is off by default. A routine reflash must never be able to
+// destroy a working bond: doing so is what turned a one-time pairing into a
+// recurring 10-minute outage. Set CODEX_BLE_BOND_REVISION to a value greater
+// than the one already stored in NVS only as a deliberate last resort, and
+// expect to re-pair afterwards.
+// 6 is the one-time escape used on 2026-09-25 for the address 28:84:85:B2:1C:73,
+// whose Windows record had degraded to "connects, encrypts, but never binds the
+// HID-over-GATT driver": the host enumerates the battery and quota services on
+// every reconnect and never touches the HID service, so no HID interface is ever
+// created and Codex Desktop has no node to open. Combined with the new
+// kBondGeneration below it leaves both halves clean for a fresh pairing. It is
+// self-disabling: the revision is written to NVS, so it fires once per board.
+#ifndef CODEX_BLE_BOND_REVISION
+#define CODEX_BLE_BOND_REVISION 6
+#endif
+
 constexpr char kBondNvsKey[] = "bond_rev";
-constexpr uint8_t kBondRevision = 5;
+constexpr uint8_t kBondRevision = CODEX_BLE_BOND_REVISION;
 
 void clearIncompatibleBondsOnce() {
+  if (kBondRevision == 0) {
+    // Disabled: see the rationale above. Kept as a function so the escape hatch
+    // stays one macro away.
+    return;
+  }
   nvs_handle_t handle = 0;
   if (nvs_open(kQuotaNvsNamespace, NVS_READWRITE, &handle) != ESP_OK) {
     ESP_LOGW(kTag, "bond migration skipped: NVS unavailable");
     return;
   }
 
+  // Always report the decision. A silent early-return here is indistinguishable
+  // from "the migration is broken", which is exactly the ambiguity that made
+  // this function hard to reason about during the 2026-09-25 bring-up.
   uint8_t storedRevision = 0;
-  nvs_get_u8(handle, kBondNvsKey, &storedRevision);
+  const esp_err_t read = nvs_get_u8(handle, kBondNvsKey, &storedRevision);
+  ESP_LOGI(kTag, "bond migration: stored=%u requested=%u read=%s bonds=%d",
+           static_cast<unsigned>(storedRevision),
+           static_cast<unsigned>(kBondRevision), esp_err_to_name(read),
+           esp_ble_get_bond_device_num());
   if (storedRevision >= kBondRevision) {
     nvs_close(handle);
     return;
@@ -180,11 +217,11 @@ void clearIncompatibleBondsOnce() {
 // only by reflashing. It now lives in NVS so the BOOT key can trigger it at
 // runtime -- see CodexMicroBle::resetBondGenerationAndRestart().
 //
-// The default is 0x5E, the one-time migration to the first image that starts
-// SMP at connect time (see CodexMicroBle::begin()). Boards flashed with 0x5D
-// must re-pair once; the key only appears in NVS once the BOOT key is used.
+// The default is 0x5F, the address generation verified by the 2026-09-25
+// recovery. The key only appears in NVS once the BOOT key is used, so existing
+// boards retain an explicitly selected later generation across firmware updates.
 constexpr char kBondGenerationNvsKey[] = "bond_gen";
-constexpr uint8_t kDefaultBondGeneration = 0x5E;
+constexpr uint8_t kDefaultBondGeneration = 0x5F;
 
 uint8_t loadBondGeneration() {
   nvs_handle_t handle = 0;
@@ -908,31 +945,62 @@ void gattsCallback(esp_gatts_cb_event_t event, esp_gatt_if_t gattsIf,
         g_instance->onConnectionEvent(true, param->connect.conn_id);
       }
       logConnectionParameters(param->connect.remote_bda);
-      // Start security before the desktop app can issue its first HID write.
-      // Windows opens the cached HID node and writes v.oai.rgbcfg immediately
-      // after the ACL link appears. Relying only on the encrypted attribute
-      // permission starts SMP too late: that first WriteFile completes with
-      // ERROR_INVALID_PARAMETER, the app closes the HID handle, and the link
-      // falls into a reconnect/timeout loop. NO_MITM matches this display-less
-      // device's Just Works bond and resumes a stored LTK on later boots.
+      // Do NOT send an SMP Security Request here. Measured, both ways.
       //
-      // COUNTER-EVIDENCE, kept deliberately: README section 6.16 records a
-      // measured run where this call produced the opposite -- because a
-      // peripheral is always BTM_ROLE_SLAVE, btm_ble_set_encryption() skips
-      // the start-encrypt branch and falls through to SMP_Pair(), so the board
-      // emits an SMP Security Request microseconds after the connection event.
-      // Against a host holding a stale bond that failed as
-      // ESP_AUTH_SMP_CONN_TOUT (102) -> reason 0x13 -> immediate reconnect, a
-      // 1-2 s loop. If that loop comes back, this is the first line to remove.
-      const esp_err_t security = esp_ble_set_encryption(
-          param->connect.remote_bda, ESP_BLE_SEC_ENCRYPT_NO_MITM);
+      // With a healthy bond the host does not need to be asked: Windows
+      // initiates link-layer encryption from the stored LTK as soon as the ACL
+      // link is up, so the link is already encrypted before the desktop app can
+      // open the HID node.
+      //
+      // With a stale host bond the request is fatal. Measured on 2026-09-25
+      // with the board advertising an address whose Windows record held an LTK
+      // this board no longer has (its half had been dropped by a bond-revision
+      // migration):
+      //
+      //   I (5011) ble: connected peer e0:0a:f6:80:71:d2
+      //   I (5011) ble: security requested id=0
+      //   I (5011) ble: host connected id=0 bonds=0
+      //   W (5026) BT_APPL: bta_dm_ble_smp_cback remove bond,rsn 102, BDA:0xE00AF68071D2
+      //   E (5027) BT_BTM: Device not found
+      //   W (5027) BT_HCI: hcif disc complete: hdl 0x1, rsn 0x13
+      //   I (5028) ble: host disconnected id=0 reason=0x13
+      //   W (5029) ble: pairing failed reason=0x66
+      //
+      // 16 ms from connect to disconnect, and this repeats indefinitely. The
+      // host never even answers the request (`rsn 102` is
+      // ESP_AUTH_SMP_CONN_TOUT); it just drops the link. Leaving the host to
+      // drive security instead keeps the link alive, which is what lets Windows
+      // eventually repair its own record.
+      //
+      // As a peripheral the local role is always BTM_ROLE_SLAVE, so
+      // btm_ble_set_encryption() cannot shortcut this either: in
+      // btm_ble_set_encryption() the BTM_BLE_SEC_ENCRYPT case only starts
+      // link-layer encryption when the role is master, and every other case
+      // falls through to SMP_Pair(). Both ESP_BLE_SEC_ENCRYPT and
+      // ESP_BLE_SEC_ENCRYPT_NO_MITM therefore end up sending the same request.
+      //
+      // Set CODEX_BLE_SECURITY_ON_CONNECT to 1 only as a bring-up experiment.
+      // The upstream reference implementation never calls this API; encryption
+      // is driven by the host, which is what the ESP_GATT_PERM_*_ENCRYPTED
+      // permissions on the report characteristics are for.
+#ifndef CODEX_BLE_SECURITY_ON_CONNECT
+#define CODEX_BLE_SECURITY_ON_CONNECT 0
+#endif
+#if CODEX_BLE_SECURITY_ON_CONNECT
+      const esp_err_t security =
+          esp_ble_set_encryption(param->connect.remote_bda,
+                                 ESP_BLE_SEC_ENCRYPT_NO_MITM);
       if (security != ESP_OK) {
-        ESP_LOGW(kTag, "security start failed id=%u: %s",
+        ESP_LOGW(kTag, "security request failed id=%u: %s",
                  param->connect.conn_id, esp_err_to_name(security));
       } else {
         ESP_LOGI(kTag, "security requested id=%u", param->connect.conn_id);
       }
-      ESP_LOGI(kTag, "host connected id=%u", param->connect.conn_id);
+#endif
+      // bonds=0 means this board has no half of the pairing while the host may
+      // still hold one -- the exact state that produces the symptom above.
+      ESP_LOGI(kTag, "host connected id=%u bonds=%d", param->connect.conn_id,
+               esp_ble_get_bond_device_num());
       break;
     }
 
@@ -1107,17 +1175,14 @@ esp_err_t CodexMicroBle::begin() {
   // a device Windows has never seen, so it will not auto-connect and `conns=0`
   // is expected until the host pairs once. Bump this only when the BTHLEDEVICE
   // chain for the current address is broken *and* you accept re-pairing.
-  //
-  // Read from NVS instead of being compiled in, because the BOOT key can now
-  // bump it at runtime: see resetBondGenerationAndRestart(). An unprogrammed
-  // key yields kDefaultBondGeneration.
-  //
-  // Generation 0x5D reached the same Windows failure state described above
-  // during the pre-security-request firmware: its HID PDO was removed after
-  // repeated 0x57 writes. 0x5E is the one-time migration to the first image
-  // that starts SMP at connect time, so kDefaultBondGeneration now carries
-  // 0x5E. Keep it stable after release so a normal firmware update never
-  // changes the paired identity.
+  // 0x5D (advertised ...:73) had to be abandoned on 2026-09-25: after the
+  // pairing record was removed, Windows kept re-connecting the address without
+  // ever completing the device tree -- no BTHLE\DEV node, no HID interface, and
+  // a scan from Settings could not offer it either (a connected device stops
+  // advertising). 0x5F presents ...:75, an address Windows has never seen, so it
+  // is discoverable and pairs cleanly. NVS normally has no override, so 0x5F
+  // remains stable; the BOOT-key recovery path can deliberately advance it if
+  // a host record becomes unrecoverable again.
   const uint8_t kBondGeneration = loadBondGeneration();
   uint8_t factoryMac[6] = {};
   if (esp_efuse_mac_get_default(factoryMac) == ESP_OK) {
