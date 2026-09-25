@@ -427,15 +427,16 @@ dashboard::AgentStatus classifyAgent(const ThreadLight& light) {
   return dashboard::classify(threadVisual(light));
 }
 
-uint32_t quotaResetRemaining() {
+uint32_t fiveHourResetRemaining() {
   if (!state.quota.available) return 0;
   // A snapshot restored from NVS has no anchor: the board cannot know how long
   // it was powered off, so there is no honest countdown to show. The dashboard
   // renders STALE instead of a number in that case.
   if (state.quota.restored) return 0;
   const uint32_t elapsed = (nowMs() - state.quota.receivedAtMs) / 1000;
-  return elapsed >= state.quota.resetInSeconds ? 0
-                                               : state.quota.resetInSeconds - elapsed;
+  return elapsed >= state.quota.fiveHourResetInSeconds
+             ? 0
+             : state.quota.fiveHourResetInSeconds - elapsed;
 }
 
 connection_health::Result connectionHealth() {
@@ -579,8 +580,9 @@ dashboard::State dashboardState() {
   ui.externalPower = docked;
   ui.quotaAvailable = state.quota.available;
   ui.quotaStale = health.quota == connection_health::Quota::Stale;
-  ui.remainingPercent = state.quota.remainingPercent;
-  ui.resetInSeconds = quotaResetRemaining();
+  ui.fiveHourRemainingPercent = state.quota.fiveHourRemainingPercent;
+  ui.fiveHourResetInSeconds = fiveHourResetRemaining();
+  ui.weeklyRemainingPercent = state.quota.weeklyRemainingPercent;
   ui.micPressed = micPressed;
   ui.voicePressed = voiceTapBannerVisible;
   ui.sendPressed = touchSendPressed;

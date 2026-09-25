@@ -40,18 +40,19 @@ cd companion
 Codex CLI（本机已登录）
    │  ① http://127.0.0.1:8787/quota        本机快路径，毫秒级
    │     失败才落到 ↓
-   │  ② codex app-server --listen stdio://  JSON-RPC 读周额度
+   │  ② codex app-server --listen stdio://  JSON-RPC 读 5h + 周额度
    ▼
-{"remaining_percent": 80, "reset_in_seconds": 92899}
+{"five_hour_remaining_percent":80,"five_hour_reset_in_seconds":9289,
+ "weekly_remaining_percent":62,"weekly_reset_in_seconds":92899}
    │  ③ BLE 写入（GATT 特征 7f0d4e66-…-5c02，handle 67）
    ▼
-板子串口：ble: quota update remaining=80.0 reset=92899s
+板子串口：ble: quota update 5h=80.0 reset=9289s weekly=62.0 reset=92899s
    ▼
 360×360 表盘刷新
 ```
 
-第 ① 步取的是**周窗口**（按 `windowDurationMins == 10080` 认，不按槽位名）。
-所以周额度用尽时表盘显示 0% 是**正确数据**，不是 bug。
+两个来源都会同时读取 300 分钟与 10080 分钟窗口，并按时长而不是槽位名识别。
+中央显示 5 小时额度，屏幕圆边的分段进度环显示周额度。
 
 ---
 

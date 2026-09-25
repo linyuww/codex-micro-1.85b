@@ -7,7 +7,7 @@ Run from this directory:
     set CX_LIVE=1 && python test_windows_companion.py   # + live App Server / PS bridge
 
 The hermetic tests never touch Bluetooth, the network, or the Codex account.
-The live tests read the real weekly allowance through the real App Server and
+The live tests read both real allowance windows through the real App Server and
 exercise the PowerShell event bridge; they never write to the board.
 """
 
@@ -34,7 +34,8 @@ def rate_limits_result(
     primary_minutes: int = 300,
     secondary_used: float = 100,
     secondary_minutes: int = 10080,
-    reset_at: int = 1_789_809_254,
+    primary_reset_at: int = 1_789_818_000,
+    weekly_reset_at: int = 1_790_300_000,
 ) -> dict:
     bucket = {
         "limitId": "codex",
@@ -42,12 +43,12 @@ def rate_limits_result(
         "primary": {
             "usedPercent": primary_used,
             "windowDurationMins": primary_minutes,
-            "resetsAt": 1_789_729_559,
+            "resetsAt": primary_reset_at,
         },
         "secondary": {
             "usedPercent": secondary_used,
             "windowDurationMins": secondary_minutes,
-            "resetsAt": reset_at,
+            "resetsAt": weekly_reset_at,
         },
         "credits": {"hasCredits": False, "unlimited": False, "balance": "0"},
         "planType": "plus",
@@ -62,30 +63,39 @@ def rate_limits_result(
 
 
 # --------------------------------------------------------------------------
-# Weekly window selection
+# Quota window selection
 # --------------------------------------------------------------------------
 
 
-class WeeklyWindowTests(unittest.TestCase):
-    def test_selects_weekly_from_secondary_slot(self):
+class QuotaWindowTests(unittest.TestCase):
+    def test_selects_both_windows_by_duration(self):
         snapshot = wc.build_snapshot(rate_limits_result(), now=1_789_800_000)
-        self.assertEqual(snapshot["_source"]["slot"], "secondary")
-        self.assertEqual(snapshot["_source"]["window_minutes"], 10080)
-        self.assertEqual(snapshot["remaining_percent"], 0)
-        self.assertEqual(snapshot["reset_in_seconds"], 1_789_809_254 - 1_789_800_000)
+        self.assertEqual(snapshot["_source"]["five_hour"]["slot"], "primary")
+        self.assertEqual(snapshot["_source"]["weekly"]["slot"], "secondary")
+        self.assertEqual(snapshot["five_hour_remaining_percent"], 100)
+        self.assertEqual(snapshot["weekly_remaining_percent"], 0)
+        self.assertEqual(snapshot["five_hour_reset_in_seconds"], 18_000)
+        self.assertEqual(snapshot["weekly_reset_in_seconds"], 500_000)
 
-    def test_selects_weekly_from_primary_slot_when_that_is_the_weekly_one(self):
+    def test_selects_swapped_slots(self):
         result = rate_limits_result(primary_minutes=10080, secondary_minutes=300)
         snapshot = wc.build_snapshot(result, now=1_789_800_000)
-        self.assertEqual(snapshot["_source"]["slot"], "primary")
+        self.assertEqual(snapshot["_source"]["weekly"]["slot"], "primary")
+        self.assertEqual(snapshot["_source"]["five_hour"]["slot"], "secondary")
 
-    def test_does_not_substitute_the_five_hour_window(self):
-        """A 5h-only bucket must fail, not silently report the 5h allowance."""
+    def test_missing_weekly_window_fails(self):
         result = rate_limits_result()
         result["rateLimitsByLimitId"]["codex"]["secondary"] = None
         with self.assertRaises(wc.CompanionError) as ctx:
             wc.build_snapshot(result, now=1_789_800_000)
         self.assertIn("weekly", str(ctx.exception))
+
+    def test_missing_five_hour_window_fails(self):
+        result = rate_limits_result()
+        result["rateLimitsByLimitId"]["codex"]["primary"] = None
+        with self.assertRaises(wc.CompanionError) as ctx:
+            wc.build_snapshot(result, now=1_789_800_000)
+        self.assertIn("5-hour", str(ctx.exception))
 
     def test_missing_windows_entirely_fails(self):
         result = rate_limits_result()
@@ -96,34 +106,35 @@ class WeeklyWindowTests(unittest.TestCase):
             wc.build_snapshot(result, now=0)
 
     def test_remaining_is_inverted_used_percent(self):
-        result = rate_limits_result(secondary_used=26)
+        result = rate_limits_result(primary_used=26, secondary_used=40)
         snapshot = wc.build_snapshot(result, now=1_789_800_000)
-        self.assertEqual(snapshot["remaining_percent"], 74)
+        self.assertEqual(snapshot["five_hour_remaining_percent"], 74)
+        self.assertEqual(snapshot["weekly_remaining_percent"], 60)
 
     def test_used_percent_is_clamped(self):
-        high = wc.build_snapshot(rate_limits_result(secondary_used=140), now=0)
-        low = wc.build_snapshot(rate_limits_result(secondary_used=-40), now=0)
-        self.assertEqual(high["remaining_percent"], 0)
-        self.assertEqual(low["remaining_percent"], 100)
+        high = wc.build_snapshot(rate_limits_result(primary_used=140), now=0)
+        low = wc.build_snapshot(rate_limits_result(primary_used=-40), now=0)
+        self.assertEqual(high["five_hour_remaining_percent"], 0)
+        self.assertEqual(low["five_hour_remaining_percent"], 100)
 
     def test_fractional_remaining_keeps_one_decimal(self):
-        result = rate_limits_result(secondary_used=33.333)
+        result = rate_limits_result(primary_used=33.333)
         snapshot = wc.build_snapshot(result, now=0)
-        self.assertEqual(snapshot["remaining_percent"], 66.7)
+        self.assertEqual(snapshot["five_hour_remaining_percent"], 66.7)
 
     def test_past_reset_time_never_goes_negative(self):
-        result = rate_limits_result(reset_at=1_000)
+        result = rate_limits_result(primary_reset_at=1_000)
         snapshot = wc.build_snapshot(result, now=2_000)
-        self.assertEqual(snapshot["reset_in_seconds"], 0)
+        self.assertEqual(snapshot["five_hour_reset_in_seconds"], 0)
 
     def test_non_numeric_fields_fail(self):
         result = rate_limits_result()
-        result["rateLimitsByLimitId"]["codex"]["secondary"]["usedPercent"] = "100"
+        result["rateLimitsByLimitId"]["codex"]["primary"]["usedPercent"] = "100"
         with self.assertRaises(wc.CompanionError):
             wc.build_snapshot(result, now=0)
 
         result = rate_limits_result()
-        result["rateLimitsByLimitId"]["codex"]["secondary"]["resetsAt"] = None
+        result["rateLimitsByLimitId"]["codex"]["primary"]["resetsAt"] = None
         with self.assertRaises(wc.CompanionError):
             wc.build_snapshot(result, now=0)
 
@@ -165,11 +176,21 @@ class BucketSelectionTests(unittest.TestCase):
 
 class PayloadTests(unittest.TestCase):
     def test_payload_has_exactly_the_wire_fields(self):
-        snapshot = wc.build_snapshot(rate_limits_result(secondary_used=26), now=1_789_800_000)
+        snapshot = wc.build_snapshot(
+            rate_limits_result(primary_used=26, secondary_used=40),
+            now=1_789_800_000,
+        )
         payload = json.loads(wc.encode_payload(snapshot))
-        self.assertEqual(set(payload), {"remaining_percent", "reset_in_seconds"})
-        self.assertEqual(payload["remaining_percent"], 74)
-        self.assertIsInstance(payload["reset_in_seconds"], int)
+        self.assertEqual(set(payload), {
+            "five_hour_remaining_percent",
+            "five_hour_reset_in_seconds",
+            "weekly_remaining_percent",
+            "weekly_reset_in_seconds",
+        })
+        self.assertEqual(payload["five_hour_remaining_percent"], 74)
+        self.assertEqual(payload["weekly_remaining_percent"], 60)
+        self.assertIsInstance(payload["five_hour_reset_in_seconds"], int)
+        self.assertIsInstance(payload["weekly_reset_in_seconds"], int)
 
     def test_payload_is_compact_ascii_and_within_the_firmware_limit(self):
         snapshot = wc.build_snapshot(rate_limits_result(), now=1_789_800_000)
@@ -180,16 +201,17 @@ class PayloadTests(unittest.TestCase):
 
     def test_payload_round_trips_through_the_firmware_parser_rules(self):
         """Mirror of quota_payload::parse in main/logic.h."""
-        snapshot = wc.build_snapshot(rate_limits_result(secondary_used=26), now=1_789_800_000)
+        snapshot = wc.build_snapshot(rate_limits_result(primary_used=26), now=1_789_800_000)
         parsed = json.loads(wc.encode_payload(snapshot))
         self.assertTrue(isinstance(parsed, dict))
-        percent = parsed["remaining_percent"]
-        seconds = parsed["reset_in_seconds"]
-        self.assertTrue(isinstance(percent, (int, float)))
-        self.assertTrue(isinstance(seconds, (int, float)))
-        self.assertGreaterEqual(percent, 0.0)
-        self.assertLessEqual(percent, 100.0)
-        self.assertGreaterEqual(seconds, 0.0)
+        for prefix in ("five_hour", "weekly"):
+            percent = parsed[f"{prefix}_remaining_percent"]
+            seconds = parsed[f"{prefix}_reset_in_seconds"]
+            self.assertTrue(isinstance(percent, (int, float)))
+            self.assertTrue(isinstance(seconds, (int, float)))
+            self.assertGreaterEqual(percent, 0.0)
+            self.assertLessEqual(percent, 100.0)
+            self.assertGreaterEqual(seconds, 0.0)
 
     def test_public_snapshot_hides_local_diagnostics(self):
         snapshot = wc.build_snapshot(rate_limits_result(), now=0)
@@ -241,7 +263,10 @@ class PowerShellBridgeTests(unittest.TestCase):
         self.assertIn(wc.QUOTA_WRITE_UUID, source)
 
     def test_write_mode_embeds_the_payload_as_base64(self):
-        payload = b'{"remaining_percent":26,"reset_in_seconds":356400}'
+        payload = (
+            b'{"five_hour_remaining_percent":26,"five_hour_reset_in_seconds":3600,'
+            b'"weekly_remaining_percent":74,"weekly_reset_in_seconds":356400}'
+        )
         source = wc.build_ps_bridge(self.ADDRESS, payload=payload, hold_seconds=0)
         self.assertIn("$doWrite = $true", source)
         self.assertIn("$holdSeconds = 0", source)
@@ -373,12 +398,20 @@ class LiveTests(unittest.TestCase):
     def test_app_server_returns_a_weekly_snapshot(self):
         options = wc.Options()
         snapshot = wc.read_snapshot(options)
-        self.assertIn("remaining_percent", snapshot)
-        self.assertIn("reset_in_seconds", snapshot)
-        self.assertEqual(snapshot["_source"]["window_minutes"], wc.WEEKLY_WINDOW_MINUTES)
-        self.assertGreaterEqual(snapshot["remaining_percent"], 0)
-        self.assertLessEqual(snapshot["remaining_percent"], 100)
-        self.assertGreater(snapshot["reset_in_seconds"], 0)
+        self.assertIn("five_hour_remaining_percent", snapshot)
+        self.assertIn("weekly_remaining_percent", snapshot)
+        self.assertEqual(
+            snapshot["_source"]["five_hour"]["window_minutes"],
+            wc.FIVE_HOUR_WINDOW_MINUTES,
+        )
+        self.assertEqual(
+            snapshot["_source"]["weekly"]["window_minutes"],
+            wc.WEEKLY_WINDOW_MINUTES,
+        )
+        for prefix in ("five_hour", "weekly"):
+            self.assertGreaterEqual(snapshot[f"{prefix}_remaining_percent"], 0)
+            self.assertLessEqual(snapshot[f"{prefix}_remaining_percent"], 100)
+            self.assertGreater(snapshot[f"{prefix}_reset_in_seconds"], 0)
         self.assertLessEqual(len(wc.encode_payload(snapshot)), wc.MAX_PAYLOAD_BYTES)
 
     def test_powershell_bridge_emits_parseable_events(self):

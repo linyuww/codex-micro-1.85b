@@ -256,6 +256,52 @@ void Canvas::fillRingArc(int cx, int cy, int rOuter, int rInner,
   }
 }
 
+void Canvas::fillSegmentedRing(int cx, int cy, int rOuter, int rInner,
+                               int segments, float segmentDegrees,
+                               int activeSegments, uint16_t activeColor,
+                               uint16_t inactiveColor) {
+  if (segments <= 0 || rOuter <= rInner || segmentDegrees <= 0.0f) return;
+  const float pitch = 360.0f / static_cast<float>(segments);
+  segmentDegrees = fminf(segmentDegrees, pitch);
+  activeSegments = std::max(0, std::min(segments, activeSegments));
+  const float outer = static_cast<float>(rOuter) + 0.5f;
+  const float inner = static_cast<float>(rInner) - 0.5f;
+  const float outerSquared = outer * outer;
+  const float innerSquared = inner * inner;
+
+  // One annulus traversal matters on the ESP32: calling fillRingArc once per
+  // segment would scan almost eight million pixels for a 60-segment ring.
+  for (int y = cy - rOuter - 1; y <= cy + rOuter + 1; ++y) {
+    const float dy = static_cast<float>(y - cy);
+    for (int x = cx - rOuter - 1; x <= cx + rOuter + 1; ++x) {
+      const float dx = static_cast<float>(x - cx);
+      const float distanceSquared = dx * dx + dy * dy;
+      if (distanceSquared > outerSquared || distanceSquared < innerSquared) {
+        continue;
+      }
+
+      float angle = atan2f(dx, -dy) * (180.0f / kPi);
+      if (angle < 0.0f) angle += 360.0f;
+      const int segment = std::min(
+          segments - 1, static_cast<int>(floorf(angle / pitch)));
+      const float within = angle - static_cast<float>(segment) * pitch;
+      if (within > segmentDegrees) continue;
+
+      const float distance = sqrtf(distanceSquared);
+      float coverage = fminf(clamp01(outer - distance),
+                             clamp01(distance - inner));
+      const float radius = fmaxf(distance, 1.0f);
+      coverage = fminf(coverage,
+                       clamp01(within * (kPi / 180.0f) * radius + 0.5f));
+      coverage = fminf(
+          coverage,
+          clamp01((segmentDegrees - within) * (kPi / 180.0f) * radius + 0.5f));
+      blendPixel(x, y, segment < activeSegments ? activeColor : inactiveColor,
+                 coverage);
+    }
+  }
+}
+
 void Canvas::fillRoundRect(int x, int y, int w, int h, int radius,
                            uint16_t color) {
   if (w <= 0 || h <= 0) return;

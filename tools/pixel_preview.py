@@ -27,6 +27,7 @@ rasterising natively while costing a single 8 KB font.
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import re
 import struct
@@ -72,6 +73,7 @@ STATUS = {
 }
 ACCENT_GREEN = rgb565(16, 255, 168)  # the CODEX LIVE line
 WARNING = rgb565(255, 189, 61)       # the setup prompt heading
+TRACK = rgb565(33, 48, 58)           # inactive weekly quota segments
 
 # ----------------------------------------------------------------- layout ---
 # All measured. See outputs/probe_lines.py and outputs/probe_final.py.
@@ -100,16 +102,17 @@ BTN_TAG_DY = -2           # tag (A1..A6) sits just below the top frame
 BTN_LABEL_DY = 10         # status label below the tag, kept clear
 MOTTO = (316, 326)
 ICON_SIZE = 20
+QUOTA_RING = dict(outer=178, inner=171, segments=60, segment_degrees=4.2)
 
 SCENES = {
-    "night": dict(clock="10:08", date="SEP 22 MON", battery=86,
+    "night": dict(clock="10:08", date="SEP 22 MON", battery=86, weekly=72,
                   status="CODEX LIVE", quota="67%", send="SEND",
-                  countdown="4D 17H", bg="bg-night.png",
+                  countdown="5H 4H 17M", bg="bg-night.png",
                   agents=[("THINK", "A1"), ("DONE", "A2"), ("INPUT", "A3"),
                           ("EMPTY", "A4"), ("ERROR", "A5"), ("IDLE", "A6")]),
-    "day": dict(clock="10:08", date="SEP 22 MON", battery=86,
+    "day": dict(clock="10:08", date="SEP 22 MON", battery=86, weekly=72,
                 status="CODEX LIVE", quota="67%", send="SEND",
-                countdown="4D 17H", bg="bg-day.png",
+                countdown="5H 4H 17M", bg="bg-day.png",
                 agents=[("THINK", "A1"), ("DONE", "A2"), ("INPUT", "A3"),
                         ("EMPTY", "A4"), ("ERROR", "A5"), ("IDLE", "A6")]),
     # The state a freshly flashed board is in: no credentials, so the clock is
@@ -132,16 +135,16 @@ SCENES = {
                             ("EMPTY", "A4"), ("EMPTY", "A5"), ("EMPTY", "A6")]),
     # The board is on external power: the green bolt remains visible even when
     # charge current has tapered to zero (47% is level 3).
-    "charging": dict(clock="10:08", date="SEP 22 MON", battery=47,
+    "charging": dict(clock="10:08", date="SEP 22 MON", battery=47, weekly=24,
                      external_power=True,
                      status="CODEX LIVE", quota="67%", send="SEND",
-                     countdown="4D 17H", bg="bg-day.png",
+                     countdown="5H 4H 17M", bg="bg-day.png",
                      agents=[("THINK", "A1"), ("DONE", "A2"), ("INPUT", "A3"),
                              ("EMPTY", "A4"), ("ERROR", "A5"), ("IDLE", "A6")]),
     # Low-battery alarm: 12% drops to level 1, the empty-outline texture.
-    "low": dict(clock="10:08", date="SEP 22 MON", battery=12,
+    "low": dict(clock="10:08", date="SEP 22 MON", battery=12, weekly=9,
                 status="CODEX LIVE", quota="67%", send="SEND",
-                countdown="4D 17H", bg="bg-day.png",
+                countdown="5H 4H 17M", bg="bg-day.png",
                 agents=[("THINK", "A1"), ("DONE", "A2"), ("INPUT", "A3"),
                         ("EMPTY", "A4"), ("ERROR", "A5"), ("IDLE", "A6")]),
 }
@@ -527,8 +530,35 @@ def draw_panel(canvas, font, scene):
                 COUNTDOWN["scale"], TEXT, centre=True)
 
 
+def draw_weekly_quota_ring(canvas, scene):
+    """Draw the firmware's segmented weekly-allowance ring."""
+    if scene.get("setup") or scene.get("pairing"):
+        return
+    remaining = max(0.0, min(100.0, float(scene.get("weekly", 0))))
+    active_segments = math.ceil(
+        remaining * QUOTA_RING["segments"] / 100.0)
+    active = WARNING if remaining <= 20 else FRAME
+    pitch = 360.0 / QUOTA_RING["segments"]
+    outer2 = QUOTA_RING["outer"] ** 2
+    inner2 = QUOTA_RING["inner"] ** 2
+    for y in range(HEIGHT):
+        dy = y - HEIGHT // 2
+        for x in range(WIDTH):
+            dx = x - WIDTH // 2
+            distance2 = dx * dx + dy * dy
+            if distance2 < inner2 or distance2 > outer2:
+                continue
+            angle = math.degrees(math.atan2(dx, -dy)) % 360.0
+            segment = int(angle // pitch)
+            if angle - segment * pitch > QUOTA_RING["segment_degrees"]:
+                continue
+            canvas.blend(x, y, active if segment < active_segments else TRACK)
+
+
 def render(scene, font, textures, background=None):
     canvas = Canvas(background)
+
+    draw_weekly_quota_ring(canvas, scene)
 
     canvas.text_outlined(font, scene["clock"], CLOCK["cx"], CLOCK["cy"],
                          CLOCK["scale"], TEXT, OUTLINE, thickness=2,

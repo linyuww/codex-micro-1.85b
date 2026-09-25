@@ -60,6 +60,9 @@ class Canvas {
   // Angles in degrees, 0 at 12 o'clock, increasing clockwise.
   void fillRingArc(int cx, int cy, int rOuter, int rInner, float startDeg,
                    float endDeg, uint16_t color);
+  void fillSegmentedRing(int cx, int cy, int rOuter, int rInner, int segments,
+                         float segmentDegrees, int activeSegments,
+                         uint16_t activeColor, uint16_t inactiveColor);
   void fillRoundRect(int x, int y, int w, int h, int radius, uint16_t color);
   void fillTriangle(int x0, int y0, int x1, int y1, int x2, int y2,
                     uint16_t color);

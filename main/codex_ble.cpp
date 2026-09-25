@@ -38,26 +38,39 @@ constexpr char kTag[] = "ble";
 // for. The first live write clears the restored flag and the value becomes
 // fresh again.
 constexpr char kQuotaNvsNamespace[] = "codex";
-constexpr char kQuotaNvsPercentKey[] = "q_pct_x10";
-constexpr char kQuotaNvsResetKey[] = "q_reset_s";
+constexpr char kFiveHourNvsPercentKey[] = "q5_pct_x10";
+constexpr char kFiveHourNvsResetKey[] = "q5_reset_s";
+constexpr char kWeeklyNvsPercentKey[] = "qw_pct_x10";
+constexpr char kWeeklyNvsResetKey[] = "qw_reset_s";
 constexpr uint32_t kQuotaNvsMaxPercentX10 = 1000;
 
 // Store the percentage as tenths in a u32 so 84.5% survives a round trip
 // without depending on NVS float support.
-void persistQuotaSnapshot(float remainingPercent, uint32_t resetInSeconds) {
+void persistQuotaSnapshot(const quota_payload::Snapshot& snapshot) {
   nvs_handle_t handle = 0;
   if (nvs_open(kQuotaNvsNamespace, NVS_READWRITE, &handle) != ESP_OK) {
     ESP_LOGW(kTag, "quota snapshot not saved: nvs_open failed");
     return;
   }
-  float clamped = remainingPercent;
-  if (clamped < 0.0f) clamped = 0.0f;
-  if (clamped > 100.0f) clamped = 100.0f;
-  const uint32_t percentX10 = static_cast<uint32_t>(clamped * 10.0f + 0.5f);
+  const auto percentX10 = [](float percent) {
+    if (percent < 0.0f) percent = 0.0f;
+    if (percent > 100.0f) percent = 100.0f;
+    return static_cast<uint32_t>(percent * 10.0f + 0.5f);
+  };
 
-  esp_err_t result = nvs_set_u32(handle, kQuotaNvsPercentKey, percentX10);
+  esp_err_t result = nvs_set_u32(handle, kFiveHourNvsPercentKey,
+                                 percentX10(snapshot.fiveHourRemainingPercent));
   if (result == ESP_OK) {
-    result = nvs_set_u32(handle, kQuotaNvsResetKey, resetInSeconds);
+    result = nvs_set_u32(handle, kFiveHourNvsResetKey,
+                         snapshot.fiveHourResetInSeconds);
+  }
+  if (result == ESP_OK) {
+    result = nvs_set_u32(handle, kWeeklyNvsPercentKey,
+                         percentX10(snapshot.weeklyRemainingPercent));
+  }
+  if (result == ESP_OK) {
+    result = nvs_set_u32(handle, kWeeklyNvsResetKey,
+                         snapshot.weeklyResetInSeconds);
   }
   if (result == ESP_OK) {
     result = nvs_commit(handle);
@@ -76,19 +89,35 @@ bool loadQuotaSnapshot(QuotaState& quota) {
   if (nvs_open(kQuotaNvsNamespace, NVS_READONLY, &handle) != ESP_OK) {
     return false;
   }
-  uint32_t percentX10 = 0;
-  uint32_t resetInSeconds = 0;
-  const esp_err_t percentResult =
-      nvs_get_u32(handle, kQuotaNvsPercentKey, &percentX10);
-  const esp_err_t resetResult =
-      nvs_get_u32(handle, kQuotaNvsResetKey, &resetInSeconds);
+  uint32_t fiveHourPercentX10 = 0;
+  uint32_t fiveHourResetInSeconds = 0;
+  uint32_t weeklyPercentX10 = 0;
+  uint32_t weeklyResetInSeconds = 0;
+  const esp_err_t fiveHourPercentResult = nvs_get_u32(
+      handle, kFiveHourNvsPercentKey, &fiveHourPercentX10);
+  const esp_err_t fiveHourResetResult = nvs_get_u32(
+      handle, kFiveHourNvsResetKey, &fiveHourResetInSeconds);
+  const esp_err_t weeklyPercentResult = nvs_get_u32(
+      handle, kWeeklyNvsPercentKey, &weeklyPercentX10);
+  const esp_err_t weeklyResetResult = nvs_get_u32(
+      handle, kWeeklyNvsResetKey, &weeklyResetInSeconds);
   nvs_close(handle);
 
-  if (percentResult != ESP_OK || resetResult != ESP_OK) return false;
-  if (percentX10 > kQuotaNvsMaxPercentX10) return false;
+  if (fiveHourPercentResult != ESP_OK || fiveHourResetResult != ESP_OK ||
+      weeklyPercentResult != ESP_OK || weeklyResetResult != ESP_OK) {
+    return false;
+  }
+  if (fiveHourPercentX10 > kQuotaNvsMaxPercentX10 ||
+      weeklyPercentX10 > kQuotaNvsMaxPercentX10) {
+    return false;
+  }
 
-  quota.remainingPercent = static_cast<float>(percentX10) / 10.0f;
-  quota.resetInSeconds = resetInSeconds;
+  quota.fiveHourRemainingPercent =
+      static_cast<float>(fiveHourPercentX10) / 10.0f;
+  quota.fiveHourResetInSeconds = fiveHourResetInSeconds;
+  quota.weeklyRemainingPercent =
+      static_cast<float>(weeklyPercentX10) / 10.0f;
+  quota.weeklyResetInSeconds = weeklyResetInSeconds;
   quota.receivedAtMs = 0;
   quota.available = true;
   quota.restored = true;
@@ -1108,9 +1137,10 @@ esp_err_t CodexMicroBle::begin() {
   // blank dial while it waits for the companion.
   if (loadQuotaSnapshot(state_.quota)) {
     ESP_LOGI(kTag,
-             "quota snapshot restored from NVS: remaining=%.1f (shown as stale "
+             "quota snapshot restored from NVS: 5h=%.1f weekly=%.1f (shown as stale "
              "until a companion pushes a fresh value)",
-             state_.quota.remainingPercent);
+             state_.quota.fiveHourRemainingPercent,
+             state_.quota.weeklyRemainingPercent);
   } else {
     ESP_LOGI(kTag, "no stored quota snapshot; dial waits for the companion");
   }
@@ -1726,8 +1756,10 @@ void CodexMicroBle::processQuotaWrite(const uint8_t* data, size_t length,
   cJSON_Delete(update);
 
   xSemaphoreTake(stateMutex_, portMAX_DELAY);
-  state_.quota.remainingPercent = snapshot.remainingPercent;
-  state_.quota.resetInSeconds = snapshot.resetInSeconds;
+  state_.quota.fiveHourRemainingPercent = snapshot.fiveHourRemainingPercent;
+  state_.quota.fiveHourResetInSeconds = snapshot.fiveHourResetInSeconds;
+  state_.quota.weeklyRemainingPercent = snapshot.weeklyRemainingPercent;
+  state_.quota.weeklyResetInSeconds = snapshot.weeklyResetInSeconds;
   state_.quota.receivedAtMs = esp_log_timestamp();
   state_.quota.available = true;
   // A live value supersedes anything restored at boot, and unlike a restored
@@ -1736,11 +1768,13 @@ void CodexMicroBle::processQuotaWrite(const uint8_t* data, size_t length,
   state_.dirty = true;
   xSemaphoreGive(stateMutex_);
 
-  persistQuotaSnapshot(snapshot.remainingPercent, snapshot.resetInSeconds);
+  persistQuotaSnapshot(snapshot);
 
-  ESP_LOGI(kTag, "quota update remaining=%.1f reset=%lus",
-           snapshot.remainingPercent,
-           static_cast<unsigned long>(snapshot.resetInSeconds));
+  ESP_LOGI(kTag, "quota update 5h=%.1f reset=%lus weekly=%.1f reset=%lus",
+           snapshot.fiveHourRemainingPercent,
+           static_cast<unsigned long>(snapshot.fiveHourResetInSeconds),
+           snapshot.weeklyRemainingPercent,
+           static_cast<unsigned long>(snapshot.weeklyResetInSeconds));
 }
 
 bool CodexMicroBle::handleRpc(const cJSON* request) {

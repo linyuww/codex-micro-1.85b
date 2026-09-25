@@ -44,12 +44,12 @@ $problems = [System.Collections.Generic.List[string]]::new()
 Write-Section '1. Can this machine read the Codex allowance?'
 $json = & $python $script:CompanionScript --json-only -v 2>&1
 $json | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
-$snapshot = $json | Where-Object { $_ -match '^\{.*"remaining_percent".*\}$' } | Select-Object -Last 1
+$snapshot = $json | Where-Object { $_ -match '^\{.*"five_hour_remaining_percent".*"weekly_remaining_percent".*\}$' } | Select-Object -Last 1
 if ($snapshot) {
     Write-Ok "allowance read: $snapshot"
 }
 else {
-    Write-Bad 'the Codex CLI did not return a weekly allowance'
+    Write-Bad 'the Codex CLI did not return both 5-hour and weekly allowances'
     $problems.Add('allowance read failed -- check that the codex CLI is logged in (set CodexPath in config.psd1 if it is not on PATH)')
 }
 

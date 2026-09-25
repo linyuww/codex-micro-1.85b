@@ -5,10 +5,9 @@ This is the Windows port of the upstream macOS companion
 (`work/codex-micro-stopwatch/companion/Sources/CodexWatchCompanion/main.swift`).
 It performs exactly two jobs:
 
-1. Read the *weekly* Codex allowance from the locally installed Codex App Server
+1. Read the 5-hour and weekly Codex allowances from the local Codex App Server
    over stdio (`initialize` -> `account/read` -> `account/rateLimits/read`),
-   convert it into the project-owned snapshot schema
-   ``{"remaining_percent": <0..100>, "reset_in_seconds": <int>}``.
+   and convert both windows into the project-owned snapshot schema.
 2. Write that snapshot to the private quota GATT characteristic on a *specific*
    board, addressed by its BLE address. Never by name matching, never by
    broadcast scan.
@@ -30,7 +29,7 @@ Design constraints that are deliberate, not incidental:
   retried in a fresh session. Windows otherwise answers discovery from a
   per-device cache that survives re-pairing, which turns into AccessDenied /
   ERROR_CANCELLED once the firmware's attribute table has changed.
-* If the weekly window is absent (or the account cannot serve it), the program
+* If either window is absent (or the account cannot serve it), the program
   fails loudly. It never fabricates a snapshot.
 
 See ``docs/COMPANION_PROTOCOL.md`` upstream for the wire contract.
@@ -60,8 +59,8 @@ from datetime import datetime
 QUOTA_SERVICE_UUID = "7f0d4e66-2ac2-4a71-bfbe-4ef61a0e5c01"
 QUOTA_WRITE_UUID = "7f0d4e66-2ac2-4a71-bfbe-4ef61a0e5c02"
 
-#: The watch shows the weekly allowance (upstream README: "Shows weekly Codex
-#: allowance remaining and the reset countdown"). 10080 minutes == 7 days.
+#: Window identity comes from duration, never primary/secondary position.
+FIVE_HOUR_WINDOW_MINUTES = 300
 WEEKLY_WINDOW_MINUTES = 10080
 
 #: Firmware rejects anything larger (codex_ble.cpp: `length > 512`).
@@ -394,14 +393,8 @@ def select_codex_bucket(rate_limits_result: dict) -> dict:
     )
 
 
-def select_weekly_window(bucket: dict) -> tuple[str, dict]:
-    """Return (slot_name, window) for the weekly window.
-
-    The weekly window is identified by ``windowDurationMins == 10080`` rather
-    than by position, because the slot holding it (`primary` vs `secondary`)
-    is not stable across plans. If no weekly window exists the caller must
-    fail: a snapshot built from the 5-hour window would be wrong on the watch.
-    """
+def select_window(bucket: dict, duration_minutes: int, label: str) -> tuple[str, dict]:
+    """Return a Codex window identified by duration, never by slot name."""
     observed: list[str] = []
     for slot in ("primary", "secondary"):
         window = bucket.get(slot)
@@ -409,47 +402,74 @@ def select_weekly_window(bucket: dict) -> tuple[str, dict]:
             continue
         minutes = window.get("windowDurationMins")
         observed.append(f"{slot}={minutes!r}")
-        if isinstance(minutes, (int, float)) and int(minutes) == WEEKLY_WINDOW_MINUTES:
+        if isinstance(minutes, (int, float)) and int(minutes) == duration_minutes:
             return slot, window
 
     detail = ", ".join(observed) if observed else "no primary/secondary windows"
     raise CompanionError(
-        f"no weekly Codex window (windowDurationMins={WEEKLY_WINDOW_MINUTES}) is "
+        f"no {label} Codex window (windowDurationMins={duration_minutes}) is "
         f"available in the codex bucket ({detail})"
     )
 
 
+def select_five_hour_window(bucket: dict) -> tuple[str, dict]:
+    return select_window(bucket, FIVE_HOUR_WINDOW_MINUTES, "5-hour")
+
+
+def select_weekly_window(bucket: dict) -> tuple[str, dict]:
+    return select_window(bucket, WEEKLY_WINDOW_MINUTES, "weekly")
+
+
+def window_snapshot(window: dict, now: float, label: str) -> dict:
+    used_raw = window.get("usedPercent")
+    if not isinstance(used_raw, (int, float)) or isinstance(used_raw, bool):
+        raise CompanionError(f"the {label} window has no numeric `usedPercent`")
+
+    reset_raw = window.get("resetsAt")
+    if not isinstance(reset_raw, (int, float)) or isinstance(reset_raw, bool):
+        raise CompanionError(f"the {label} window has no numeric `resetsAt`")
+
+    used = min(100.0, max(0.0, float(used_raw)))
+    return {
+        "remaining_percent": _tidy_number(100.0 - used),
+        "reset_in_seconds": max(0, int(float(reset_raw) - now)),
+        "used_percent": used,
+        "reset_at": int(float(reset_raw)),
+    }
+
+
 def build_snapshot(rate_limits_result: dict, now: float | None = None) -> dict:
-    """Convert an `account/rateLimits/read` result into the wire snapshot."""
+    """Convert both Codex windows into the dashboard's wire snapshot."""
     if now is None:
         now = time.time()
 
     bucket = select_codex_bucket(rate_limits_result)
-    slot, window = select_weekly_window(bucket)
-
-    used_raw = window.get("usedPercent")
-    if not isinstance(used_raw, (int, float)) or isinstance(used_raw, bool):
-        raise CompanionError("the weekly window has no numeric `usedPercent`")
-
-    reset_raw = window.get("resetsAt")
-    if not isinstance(reset_raw, (int, float)) or isinstance(reset_raw, bool):
-        raise CompanionError("the weekly window has no numeric `resetsAt`")
-
-    used = min(100.0, max(0.0, float(used_raw)))
-    remaining = min(100.0, max(0.0, 100.0 - used))
-    reset_in = max(0, int(float(reset_raw) - now))
+    five_hour_slot, five_hour_window = select_five_hour_window(bucket)
+    weekly_slot, weekly_window = select_weekly_window(bucket)
+    five_hour = window_snapshot(five_hour_window, now, "5-hour")
+    weekly = window_snapshot(weekly_window, now, "weekly")
 
     snapshot = {
-        "remaining_percent": _tidy_number(remaining),
-        "reset_in_seconds": reset_in,
+        "five_hour_remaining_percent": five_hour["remaining_percent"],
+        "five_hour_reset_in_seconds": five_hour["reset_in_seconds"],
+        "weekly_remaining_percent": weekly["remaining_percent"],
+        "weekly_reset_in_seconds": weekly["reset_in_seconds"],
     }
     snapshot["_source"] = {
         "limit_id": bucket.get("limitId"),
-        "slot": slot,
-        "window_minutes": int(window.get("windowDurationMins")),
-        "used_percent": used,
+        "five_hour": {
+            "slot": five_hour_slot,
+            "window_minutes": FIVE_HOUR_WINDOW_MINUTES,
+            "used_percent": five_hour["used_percent"],
+            "reset_at": five_hour["reset_at"],
+        },
+        "weekly": {
+            "slot": weekly_slot,
+            "window_minutes": WEEKLY_WINDOW_MINUTES,
+            "used_percent": weekly["used_percent"],
+            "reset_at": weekly["reset_at"],
+        },
         "plan_type": bucket.get("planType"),
-        "reset_at": int(float(reset_raw)),
     }
     return snapshot
 
@@ -480,8 +500,7 @@ def bridge_to_rate_limits(payload: dict) -> dict:
 
     Converting into the App Server shape rather than straight into a snapshot
     keeps exactly one window-selection rule for both sources: `build_snapshot()`
-    still picks the weekly window by its duration and never by slot name, so the
-    two sources cannot silently disagree about which window the dial shows.
+    picks both windows by duration and never by slot name.
     """
     status = payload.get("status")
     if status not in (None, "ok"):
@@ -537,8 +556,10 @@ def read_bridge_quota(url: str, timeout: float = BRIDGE_TIMEOUT_SECONDS) -> dict
 def public_snapshot(snapshot: dict) -> dict:
     """Strip local diagnostics so only the wire fields remain."""
     return {
-        "remaining_percent": snapshot["remaining_percent"],
-        "reset_in_seconds": snapshot["reset_in_seconds"],
+        "five_hour_remaining_percent": snapshot["five_hour_remaining_percent"],
+        "five_hour_reset_in_seconds": snapshot["five_hour_reset_in_seconds"],
+        "weekly_remaining_percent": snapshot["weekly_remaining_percent"],
+        "weekly_reset_in_seconds": snapshot["weekly_reset_in_seconds"],
     }
 
 
@@ -1489,17 +1510,18 @@ def read_snapshot(options: Options) -> dict:
     if options.bridge_url:
         try:
             rate_limits = read_bridge_quota(options.bridge_url)
+            snapshot = build_snapshot(rate_limits)
         except CompanionError as exc:
             if options.verbose:
                 print(f"[bridge] {exc}; falling back to the App Server",
                       file=sys.stderr)
         else:
-            snapshot = build_snapshot(rate_limits)
             if options.verbose:
                 source = snapshot["_source"]
                 print(
-                    "[bridge] weekly window: limitId={limit_id} slot={slot} "
-                    "window={window_minutes}min used={used_percent}% plan={plan_type}".format(**source),
+                    "[bridge] Codex windows: 5h slot={five_hour[slot]} "
+                    "used={five_hour[used_percent]}%; weekly slot={weekly[slot]} "
+                    "used={weekly[used_percent]}% plan={plan_type}".format(**source),
                     file=sys.stderr,
                 )
             return snapshot
@@ -1518,8 +1540,9 @@ def read_snapshot(options: Options) -> dict:
     if options.verbose:
         source = snapshot["_source"]
         print(
-            "[app-server] weekly window: limitId={limit_id} slot={slot} "
-            "window={window_minutes}min used={used_percent}% plan={plan_type}".format(**source),
+            "[app-server] Codex windows: 5h slot={five_hour[slot]} "
+            "used={five_hour[used_percent]}%; weekly slot={weekly[slot]} "
+            "used={weekly[used_percent]}% plan={plan_type}".format(**source),
             file=sys.stderr,
         )
     return snapshot
@@ -1697,10 +1720,11 @@ def run_ble_once(options: Options, snapshot: dict) -> int:
         if result.write_acknowledged:
             wire = public_snapshot(snapshot)
             print(
-                "write acknowledged by ATT: remaining {remaining}%, resets in "
-                "{reset}".format(
-                    remaining=wire["remaining_percent"],
-                    reset=format_reset(wire["reset_in_seconds"]),
+                "write acknowledged by ATT: 5h remaining {five_hour}%, resets in "
+                "{reset}; weekly remaining {weekly}%".format(
+                    five_hour=wire["five_hour_remaining_percent"],
+                    reset=format_reset(wire["five_hour_reset_in_seconds"]),
+                    weekly=wire["weekly_remaining_percent"],
                 )
             )
             return 0

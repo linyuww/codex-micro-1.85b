@@ -15,7 +15,7 @@
 
 ## 功能一览
 
-- **360 × 360 像素仪表盘**：日夜主题、时钟日期、额度环、6 个智能体状态、连接健康度与完成提示。
+- **360 × 360 像素仪表盘**：日夜主题、时钟日期、中央 5 小时额度、周额度外环、6 个智能体状态、连接健康度与完成提示。
 - **ChatGPT Desktop 控制**：支持选择智能体、Send、四向滑动、Voice Chat 和 push-to-talk。
 - **BLE HID + 私有遥测协议**：兼容 Codex Micro 的 JSON-RPC 分片协议，并上报真实电量。
 - **按键配对模式**：长按 BOOT 3 秒断开链路、清除绑定并重新可配对（像耳机一样），
@@ -24,7 +24,7 @@
 - **自动校时**：联网后通过 SNTP 获取时间，默认显示 UTC+8。
 - **电源状态识别**：读取 BQ27220 电量计，区分电池供电、外部供电和充电状态。
 - **完成提示音**：使用 ES8311 + I2S 播放任务完成提示。
-- **Windows 额度伴生程序**：读取本机 Codex 周额度，并通过 BLE 同步到表盘。
+- **Windows 额度伴生程序**：读取本机 Codex 的 5 小时与周额度，并通过 BLE 同步到表盘。
 - **离线 UI 预览与回归工具**：无需烧录即可生成日间、夜间、离线、配网等界面截图。
 
 ## 快速开始
@@ -553,14 +553,14 @@ ASCII 时会拒绝落盘，避免 PowerShell 5.1 按 ANSI 解码把脚本读坏�
 板子串口对应收到：
 
 ```
-I (1168684) ble: quota update remaining=0.0 reset=15649s
+I (1168684) ble: quota update 5h=99.0 reset=15649s weekly=0.0 reset=356400s
 ```
 
 > 如果 `--probe-only` 报 `GATT service discovery returned Unreachable`，
 > 那是另一个问题（主机 GATT 缓存/绑定过期），先按 6.6 重新配对；本次修复后
 > 同一台机器上服务发现已经稳定返回 `Success`。
 
-### 6.10 仪表盘显示 0% 不等于故障
+### 6.10 中央 5 小时额度与周额度外环
 
 Codex 的 `account/rateLimits/read` 一次返回**两个**窗口：
 
@@ -569,13 +569,10 @@ Codex 的 `account/rateLimits/read` 一次返回**两个**窗口：
 | `primary` | 300 | 5 小时滚动窗口 | 已用 1% → 剩余 **99%** |
 | `secondary` | 10080 | 周窗口（7 天） | 已用 100% → 剩余 **0%** |
 
-上游 macOS companion 读的是 **`primary`（5 小时）**；本 Windows 端口按
-"表盘显示周额度"的定位读的是 **周窗口**（按 `windowDurationMins == 10080`
-识别，不按槽位名，因为槽位在不同套餐下会互换）。
-
-所以当周额度用尽、而 5 小时窗口还有余量时，表盘显示 **0%** 是**正确数据**，
-不是 bug。想让表盘改看 5 小时窗口，把 `build_snapshot()` 里的
-`select_weekly_window()` 换成 `bucket["primary"]` 即可。
+伴生程序同时读取两个窗口，并按 `windowDurationMins` 识别而不依赖槽位名：
+中央百分比与 `5H` 倒计时显示 300 分钟窗口，屏幕圆边的分段进度环显示
+10080 分钟周窗口。这样即使周额度耗尽，只要 5 小时窗口仍有余量，中央也会
+继续显示可用额度，而外环会如实显示为 0%。
 
 ### 6.11 Windows GATT 缓存导致写入间歇失败（`AccessDenied` / `ERROR_CANCELLED`）
 
@@ -621,8 +618,8 @@ Codex 的 `account/rateLimits/read` 一次返回**两个**窗口：
   才看到 `ERROR_CANCELLED` 而不是无用的"发生一个或多个错误"。
 
 > 连续实测（同一条命令、间隔 4 秒）：**3/3 成功**，板子侧
-> `quota update remaining=0.0 reset=13700s`，与载荷
-> `reset_in_seconds=13700` 完全一致，35 次通知零拥塞。
+> `quota update 5h=99.0 reset=13700s weekly=0.0 reset=356400s`，与载荷的
+> 两组额度字段完全一致，35 次通知零拥塞。
 
 ### 6.12 蓝牙连上了但 Codex 界面没反应：HID 通知 CCCD 没使能
 
@@ -1333,16 +1330,16 @@ codex-micro-1.85b/
 ② codex app-server --listen stdio://  ← 本机 codex CLI，复用已有登录态（兜底）
    ↓ JSON-RPC（换行分隔）
 initialize → initialized → account/read → account/rateLimits/read
-   ↓ 取 codex 桶的额度窗口（按 windowDurationMins 认，不按 slot 名认）
-{"remaining_percent": 84, "reset_in_seconds": 600373}
+   ↓ 同时取 300 / 10080 分钟窗口（按 windowDurationMins 认，不按 slot 名认）
+{"five_hour_remaining_percent":84,"five_hour_reset_in_seconds":13700,
+ "weekly_remaining_percent":62,"weekly_reset_in_seconds":600373}
    ↓ BLE 写入
 7f0d4e66-...-5c02  →  表盘刷新
 ```
 
 **为什么要有 ①**：App Server 每次都要现拉一个 Node CLI，实测约 5 秒；而已在运行的
-本机服务是 HTTP 秒回。两者结果一致（实测同为 `remaining=84`，窗口同为
-`slot=secondary window=10080min`）——因为 ① 的结果会**重排成 App Server 的结构**
-再交给同一个 `build_snapshot()`，窗口选择规则只有一份，两个来源不可能选出不同窗口。
+本机服务是 HTTP 秒回。① 的结果会**重排成 App Server 的结构**再交给同一个
+`build_snapshot()`，两个窗口都按时长选择，因此两个来源不会对窗口含义产生分歧。
 
 `--no-bridge` 可以强制走 ②；`--bridge-url` 换地址。地址不通时会自动回落到 ②，
 不会因此失败。
@@ -1403,8 +1400,8 @@ python windows_companion.py --device-address $BOARD --watch --interval 60 -v
 > 问题就在哪一层。`WinError 206` 见 6.9，间歇性写入失败见 6.11。
 
 > 板子侧的对照方法：抓 COM5 串口。成功一定伴随
-> `ble: quota update remaining=… reset=…s`，且该行的 `reset` 必须等于
-> 载荷里的 `reset_in_seconds`。看不到这一行就说明 PDU 根本没到板子，
+> `ble: quota update 5h=… reset=…s weekly=… reset=…s`，且两组值必须等于
+> 载荷里的 5 小时/周额度字段。看不到这一行就说明 PDU 根本没到板子，
 > 问题在主机侧，不要去改固件。
 
 ---
