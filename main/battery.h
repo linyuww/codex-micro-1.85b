@@ -16,7 +16,15 @@ namespace battery {
 struct Sample {
   // False until the first successful read; percent stays -1 until then.
   bool valid = false;
+  // Best estimate of the pack's state of charge, and the value the dashboard
+  // and the BLE battery service publish. It is the gauge's own StateOfCharge
+  // whenever that is fresh, and a voltage-advanced estimate in between -- see
+  // the note on `socFromMillivolts` in battery_logic.h for why the gauge's
+  // value cannot be trusted on its own.
   int percent = -1;
+  // The raw StateOfCharge() the gauge reported, kept for logging. It trails
+  // `percent` by however long the gauge has been asleep.
+  int gaugePercent = -1;
   bool charging = false;
   bool discharging = false;
   // True when a USB host is attached or the gauge reports that the pack is not

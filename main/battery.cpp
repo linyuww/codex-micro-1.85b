@@ -18,11 +18,21 @@ constexpr char kTag[] = "battery";
 
 // Standard command registers. The gauge serves 0x00..0x3F as one readable
 // block, so a single transaction refreshes every field we care about.
+//
+// Addresses follow the BQ27220 standard command map (TRM SLUUBD4). Note the
+// map is NOT a dense 2-byte array: 0x26 and 0x2A are reserved holes, and
+// 0x2C/0x2E are StateOfCharge/StateOfHealth rather than part of a
+// RemainingCapacity ladder. Cross-checked against the mverch67/BQ27220
+// driver, which reads the same fields one word at a time.
+constexpr uint8_t kRegTemperature = 0x06;
 constexpr uint8_t kRegVoltage = 0x08;
 constexpr uint8_t kRegBatteryStatus = 0x0A;
 constexpr uint8_t kRegCurrent = 0x0C;
+constexpr uint8_t kRegRemainingCapacity = 0x10;
 constexpr uint8_t kRegFullChargeCapacity = 0x12;
+constexpr uint8_t kRegRawCoulombCount = 0x22;
 constexpr uint8_t kRegStateOfCharge = 0x2C;
+constexpr uint8_t kRegStateOfHealth = 0x2E;
 constexpr uint8_t kBlockStart = 0x00;
 constexpr size_t kBlockLength = 0x40;
 
@@ -38,9 +48,24 @@ constexpr uint32_t kRefreshIntervalMs = 5000;
 constexpr uint16_t kMinPlausibleMv = 2000;
 constexpr uint16_t kMaxPlausibleMv = 4600;
 
+// The gauge's Current() reads 0 mA on this board, so the current-based
+// charging test can never pass. Fall back to "on external power and the
+// estimate climbed over this window".
+constexpr uint32_t kChargeEvidenceWindowMs = 10 * 60 * 1000;
+constexpr int kChargeEvidenceRise = 1;
+
 Sample s_sample;
 uint32_t s_lastReadMs = 0;
 bool s_probed = false;
+
+// Turns the gauge's state of charge into something that keeps moving even
+// while the gauge is asleep. See battery_logic.h for why.
+battery_logic::SocTracker s_tracker;
+
+// Charging evidence window.
+uint32_t s_chargeWindowStartMs = 0;
+int s_chargeWindowStartPercent = -1;
+bool s_chargeInferred = false;
 
 void refreshExternalPower() {
   s_sample.externalPower = battery_logic::hasExternalPower(
@@ -60,6 +85,51 @@ bool readBlock(uint8_t* block) {
                                  kBlockLength) == ESP_OK;
 }
 
+// Compact one-line decode of a freshly read block.
+void logGaugeBlock(const uint8_t* block, const char* why) {
+  ESP_LOGI(kTag,
+           "%s: volt=%u mV curr=%d mA rc=%u mAh fcc=%u mAh soc=%u%% "
+           "soh=%u%% temp=%.1fK status=0x%04X rawcc=%d",
+           why, littleEndian16(block + kRegVoltage),
+           littleEndianS16(block + kRegCurrent),
+           littleEndian16(block + kRegRemainingCapacity),
+           littleEndian16(block + kRegFullChargeCapacity),
+           littleEndian16(block + kRegStateOfCharge),
+           littleEndian16(block + kRegStateOfHealth),
+           littleEndian16(block + kRegTemperature) / 10.0f,
+           littleEndian16(block + kRegBatteryStatus),
+           littleEndianS16(block + kRegRawCoulombCount));
+}
+
+void updateEstimate(int gaugePercent, int voltageMv) {
+  const int before = s_tracker.reported;
+  const bool moved = s_tracker.update(gaugePercent, voltageMv);
+
+  if (s_tracker.gaugeRefreshed && before >= 0 && before != s_tracker.reported) {
+    ESP_LOGI(kTag, "gauge refreshed: soc=%d%% (estimate was %d%%) at %u mV",
+             s_tracker.reported, before, voltageMv);
+  } else if (moved) {
+    ESP_LOGD(kTag, "gauge stale at %d%%; %d mV moves estimate %d->%d%%",
+             gaugePercent, voltageMv, before, s_tracker.reported);
+  }
+}
+
+// The gauge cannot tell us whether the pack is charging (Current() is 0), so
+// watch the estimate instead: climbing while on external power is the only
+// evidence available on this board.
+void updateChargingEvidence(bool externalPower, uint32_t nowMs) {
+  if (s_chargeWindowStartPercent < 0 ||
+      nowMs - s_chargeWindowStartMs >= kChargeEvidenceWindowMs) {
+    if (s_chargeWindowStartPercent >= 0 && s_tracker.reported >= 0) {
+      s_chargeInferred =
+          externalPower &&
+          s_tracker.reported >= s_chargeWindowStartPercent + kChargeEvidenceRise;
+    }
+    s_chargeWindowStartMs = nowMs;
+    s_chargeWindowStartPercent = s_tracker.reported;
+  }
+}
+
 }  // namespace
 
 esp_err_t init() {
@@ -76,6 +146,10 @@ esp_err_t init() {
   }
   s_probed = true;
   ESP_LOGI(kTag, "BQ27220 online voltage=%u mV", voltage);
+  logGaugeBlock(block, "boot");
+  // Raw bytes, for the next time a field looks wrong. DEBUG keeps them out of
+  // the normal boot log but one sdkconfig change brings them back.
+  ESP_LOG_BUFFER_HEX_LEVEL(kTag, block, kBlockLength, ESP_LOG_DEBUG);
   return ESP_OK;
 }
 
@@ -115,19 +189,24 @@ Sample read(uint32_t nowMs) {
 
   s_sample.voltageMv = voltage;
   s_sample.currentMa = current;
-  s_sample.percent = soc <= 100 ? static_cast<int>(soc) : -1;
+  s_sample.gaugePercent = soc <= 100 ? static_cast<int>(soc) : -1;
   s_sample.discharging = (status & kStatusDischarging) != 0;
-  s_sample.charging =
-      battery_logic::isCharging(current, s_sample.discharging);
   s_sample.fullChargeCapacityMah =
       littleEndian16(block + kRegFullChargeCapacity);
-  s_sample.valid = s_sample.percent >= 0;
   refreshExternalPower();
 
+  updateEstimate(s_sample.gaugePercent, voltage);
+  updateChargingEvidence(s_sample.externalPower, nowMs);
+  s_sample.percent = s_tracker.reported;
+  s_sample.charging = battery_logic::isCharging(current, s_sample.discharging) ||
+                      s_chargeInferred;
+  s_sample.valid = s_sample.percent >= 0;
+
   s_lastReadMs = nowMs;
-  ESP_LOGD(kTag, "soc=%d%% %u mV %d mA dsg=%d charging=%d external=%d",
-           s_sample.percent, voltage, current, s_sample.discharging ? 1 : 0,
-           s_sample.charging ? 1 : 0, s_sample.externalPower ? 1 : 0);
+  ESP_LOGD(kTag, "soc=%d%% (gauge %d%%) %u mV %d mA dsg=%d charging=%d ext=%d",
+           s_sample.percent, s_sample.gaugePercent, voltage, current,
+           s_sample.discharging ? 1 : 0, s_sample.charging ? 1 : 0,
+           s_sample.externalPower ? 1 : 0);
   return s_sample;
 }
 
