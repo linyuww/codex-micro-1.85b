@@ -1,7 +1,12 @@
 # --- ESP-IDF generated output ---------------------------------------------
 # Build tree and the component-manager download cache are fully regenerable.
-build/
-managed_components/
+#
+# ⚠️ The leading slash is load-bearing. A bare `build/` matches a directory
+# named build at ANY depth, which silently swallowed scripts/build/ — the
+# ESP-IDF launchers documented in the README never made it into a commit.
+# Same reasoning for `logs/` below.
+/build/
+/managed_components/
 sdkconfig.old
 
 # Recovered/corrupted Git metadata backups are local recovery material only.
@@ -11,9 +16,37 @@ sdkconfig.old
 __pycache__/
 *.py[cod]
 
-# --- Transient serial captures and traces ----------------------------------
-# boot*.log, cap_*.log, trace*.log, live_test.log, probe_run.log, set_target.log
+# --- 日志：不提交 -----------------------------------------------------------
+# logs/ 里是串口抓取与伴生程序运行日志，带着本机的串口号、蓝牙地址和用户名
+# 路径。只留在本地供排障与后续 AI 参考。
+#   logs/serial/      串口抓取（boot*.log / cap_*.log / trace*.log …）
+#   logs/companion/   伴生程序每日运行日志
+# 末尾的 *.log 是兜底：任何散落在别处的日志同样不提交。
+# 前导斜杠锚定到仓库根，理由同上面的 /build/。
+/logs/
 *.log
+
+# --- 调试过程：默认不提交，两份参考材料例外 ---------------------------------
+# debug/ 是「怎么定位、走了哪些弯路」的完整记录（**含失败路径**），带本机信息
+# （串口号、蓝牙地址、用户名路径），默认不进仓库，只在本地保留供后续 AI 参考。
+#   debug/README.md               索引：按现象查
+#   debug/porting-log.md          移植踩坑 6.1–6.17（原 README 第 6 章）
+#   debug/ble-troubleshooting.md  BLE 排障手册 7.1–7.5（原 README 第 7 章）
+#   debug/ui-replace.md           表盘换肤契约
+#   debug/tmp/                    历史素材与草稿
+#
+# 但下面两份是**参考材料**而不是调试日志，要留在仓库里（重组前就是跟踪状态）：
+#   debug/session-2026-09-25.md   两轮「连上但功能受限」的完整定位记录
+#   debug/reference/devcomm.js    桌面端 wl_device_comm 打包产物，核对 HID 分帧用
+#
+# ⚠️ 这里必须写 `debug/*` 而不是 `debug/`。带尾斜杠会把目录**本身**排除掉，
+# git 便不再向下遍历，后面所有 `!` 取反一律失效 —— 官方原话是
+# "It is not possible to re-include a file if a parent directory of that file
+# is excluded"。`debug/*` 只排除直接子项，目录本身仍可遍历，白名单才生效。
+debug/*
+!debug/reference/
+!debug/reference/devcomm.js
+!debug/session-2026-09-25.md
 
 # --- Local, machine-specific state ----------------------------------------
 # Serial-port/device bindings, host bridge state, recovery images.
@@ -26,12 +59,7 @@ __pycache__/
 .workbuddy-ai/
 
 # --- UI replacement kit ----------------------------------------------------
-# Local tooling and notes for swapping the dashboard art. Kept out of the
-# tree so a restyle never lands in a commit by accident.
-tools/apply_ui_assets.py
-UI_REPLACE.md
-/tmp/
-
-# --- Companion runtime output ----------------------------------------------
-# Per-day launcher logs. Machine-specific ports and addresses live in them.
-companion/logs/
+# Local tooling for swapping the dashboard art. Kept out of the tree so a
+# restyle never lands in a commit by accident. Its contract lives in
+# debug/ui-replace.md, which is ignored along with the rest of debug/.
+scripts/assets/apply_ui_assets.py

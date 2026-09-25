@@ -18,7 +18,7 @@
 // walking single rows and columns looking for a saturated accent hue. Bounding
 // boxes were not usable -- the background art bleeds into them.
 //
-// tools/pixel_preview.py is the reference implementation of this same layout.
+// scripts/assets/pixel_preview.py is the reference implementation of this same layout.
 // The two are meant to agree pixel for pixel, so anything changed here should
 // be changed there too, and vice versa.
 
@@ -174,7 +174,7 @@ struct ThreadVisual {
 };
 
 // A premultiplied icon texture: colour words and a coverage plane. The two
-// arrays are generated side by side by tools/make_icon_textures.py, so they
+// arrays are generated side by side by scripts/assets/make_icon_textures.py, so they
 // are always the same length and always belong together.
 struct IconTexture {
   const std::uint16_t* words;

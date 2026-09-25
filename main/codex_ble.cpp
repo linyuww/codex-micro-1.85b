@@ -312,7 +312,7 @@ constexpr size_t kReportBodySize = 63;
 // the "reads battery and quota but never the HID handles" state was diagnosed
 // as "the link is unencrypted", and turning this off was tried. It changed
 // nothing -- the host kept reading exactly the same four handles. What actually
-// fixed it was resetting the host's Bluetooth stack (tools/bt_radio_toggle.py).
+// fixed it was resetting the host's Bluetooth stack (scripts/windows/bt_radio_toggle.py).
 // So the encrypted permissions were never the obstacle, and the symptom of a
 // host that has stopped enumerating is *not* evidence about encryption.
 #ifndef CODEX_BLE_REQUIRE_ENCRYPTION
@@ -1184,7 +1184,7 @@ esp_err_t CodexMicroBle::begin() {
   //     parameters -- but there is NO \Services subkey, i.e. Windows never
   //     once completed GATT enumeration for it.
   //   * The PnP node BTHLE\DEV_288485B21C79 is present and "OK", but there is
-  //     no BTHLEDEVICE\{00001812-...} HID child, so tools/hid_caps.py reports
+  //     no BTHLEDEVICE\{00001812-...} HID child, so scripts/windows/hid_caps.py reports
   //     "no HID interface with VID_303A&PID_8360 is present" and the desktop
   //     app has no node to open.
   //   * WinRT reports IsPaired=false AND CanPair=false -- the contradictory
