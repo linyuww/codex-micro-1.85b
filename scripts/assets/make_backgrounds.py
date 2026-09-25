@@ -37,7 +37,8 @@ def rgb565_word(r: int, g: int, b: int) -> int:
     return ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3)
 
 
-def convert(source: str, destination: str) -> int:
+def encode(source: str) -> bytes:
+    """Return the RGB565 panel-order blob for one scene PNG."""
     image = Image.open(source)
     if image.size != (WIDTH, HEIGHT):
         raise SystemExit(f"{source}: need {WIDTH}x{HEIGHT}, got {image.size}")
@@ -52,7 +53,11 @@ def convert(source: str, destination: str) -> int:
         # Big-endian on purpose: matches the framebuffer's stored order.
         out[i * 2] = (word >> 8) & 0xFF
         out[i * 2 + 1] = word & 0xFF
+    return bytes(out)
 
+
+def convert(source: str, destination: str) -> int:
+    out = encode(source)
     os.makedirs(os.path.dirname(os.path.abspath(destination)), exist_ok=True)
     with open(destination, "wb") as handle:
         handle.write(out)
@@ -98,11 +103,15 @@ def main() -> int:
                 print(f"MISSING {destination}")
                 stale.append(scene)
                 continue
-            source_mtime = os.path.getmtime(source)
-            target_mtime = os.path.getmtime(destination)
-            size = os.path.getsize(destination)
-            ok = size == expected and target_mtime >= source_mtime
-            print(f"{scene}: {size} bytes, "
+            # Compare content, not timestamps. git resets mtimes on every
+            # checkout and clone, so `target_mtime >= source_mtime` reported
+            # STALE on trees whose blobs were byte-for-byte correct -- which
+            # made this check useless in exactly the situation it exists for
+            # (a fresh clone).
+            with open(destination, "rb") as handle:
+                on_disk = handle.read()
+            ok = on_disk == encode(source)
+            print(f"{scene}: {len(on_disk)} bytes, "
                   f"{'up to date' if ok else 'STALE'}")
             if not ok:
                 stale.append(scene)
