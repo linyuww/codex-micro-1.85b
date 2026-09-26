@@ -283,7 +283,7 @@ bool storeBondGeneration(uint8_t value) {
 
 constexpr char kDeviceName[] = "Codex Micro";
 constexpr char kManufacturer[] = "Work Louder";
-constexpr char kFirmwareVersion[] = "0.1.0-waveshare-1.85b";
+constexpr char kFirmwareVersion[] = "1.1.0-waveshare-1.85b";
 constexpr size_t kPayloadSize = 61;
 constexpr size_t kReportBodySize = 63;
 
