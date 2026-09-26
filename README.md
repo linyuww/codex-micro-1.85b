@@ -2,8 +2,6 @@
 
 把 Waveshare ESP32-S3-Touch-LCD-1.85B 变成 ChatGPT Desktop 的实体控制器。
 
-> 社区移植项目，不是 OpenAI、M5Stack 或 Waveshare 的官方固件。
-
 ## 预览
 
 ![Codex Micro 像素仪表盘](scripts/assets/preview/pixel-day.png)
